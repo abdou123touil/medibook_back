@@ -191,7 +191,7 @@ router.put('/profile', authenticateToken, upload.fields([
       user.hospitalName = hospitalName || user.hospitalName;
       user.requiresConfirmation = requiresConfirmation !== undefined ? requiresConfirmation === 'true' : user.requiresConfirmation;
     }
-    if (req.files['profileImage']) {
+    if (req.files?.['profileImage']) {
       user.profileImage = req.files['profileImage'][0].buffer.toString('base64');
     }
 
