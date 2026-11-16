@@ -366,7 +366,7 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
     const appointments = await Appointment.find({
       doctorId: doctor._id,
       date: { $gte: start, $lte: end },
-      status: { $in: ['pending', 'accepted'] },
+      status: { $in: ['pending', 'accepted', 'completed'] },
     }).select('_id patientId date time status isTeleconsultation');
 
     const { remaining: availableDates, removed: removedAvailability } = removeAvailabilityInRange(
@@ -517,7 +517,7 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
     const appointments = await Appointment.find({
       doctorId,
       date: { $gte: startDate, $lte: endDate },
-      status: { $in: ['pending', 'accepted'] },
+      status: { $in: ['pending', 'accepted', 'completed'] },
     });
     const activeOffers = await WaitlistEntry.find({
       doctorId,
