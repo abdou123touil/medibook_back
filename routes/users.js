@@ -468,10 +468,17 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
       status: { $in: ['offered', 'booking'] },
       offeredUntil: { $gt: new Date() },
     }).select('date offeredTime');
+    const blockedPeriods = await DoctorAbsence.find({
+      doctorId,
+      status: 'active',
+      startDate: { $lte: endDate },
+      endDate: { $gte: startDate },
+    }).select('startDate endDate').lean();
 
     const availableSlots = {};
     for (const [date, times] of doctor.availability.entries()) {
-      if (date >= startDate && date <= endDate) {
+      const isBlocked = blockedPeriods.some((period) => date >= period.startDate && date <= period.endDate);
+      if (date >= startDate && date <= endDate && !isBlocked) {
         const bookedTimes = appointments
           .filter(apt => apt.date.toISOString().split('T')[0] === date)
           .map(apt => apt.time);
@@ -482,6 +489,7 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
 
     res.json({
       availableSlots,
+      blockedPeriods,
       requiresConfirmation: doctor.requiresConfirmation,
       message: 'Créneaux disponibles récupérés avec succès.',
     });
