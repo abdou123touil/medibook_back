@@ -415,7 +415,7 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
     }
 
     const now = new Date();
-    let start, groupFormat;
+    let start, end = now, groupFormat;
     if (timeRange === 'day') {
       start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
       groupFormat = '%Y-%m-%d';
@@ -439,10 +439,13 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       if (isNaN(start.getTime())) {
         return res.status(400).json({ error: 'startDate invalide.' });
       }
-      now = new Date(endDate);
-      if (isNaN(now.getTime())) {
+      end = new Date(endDate);
+      if (isNaN(end.getTime())) {
         return res.status(400).json({ error: 'endDate invalide.' });
       }
+      // Inclure toute la journée sélectionnée, même si le sélecteur envoie minuit.
+      end.setHours(23, 59, 59, 999);
+      start.setHours(0, 0, 0, 0);
       groupFormat = '%Y-%m-%d';
     }
 
@@ -450,8 +453,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       doctorId: new mongoose.Types.ObjectId(doctorId),
       status: { $in: ['pending', 'accepted', 'completed', 'cancelled'] },
       date: {
-        $gte: start.toISOString(),
-        $lte: now.toISOString(),
+        $gte: start,
+        $lte: end,
       },
     };
 
@@ -527,8 +530,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
     const totalAppointments = await Appointment.countDocuments({
       doctorId: new mongoose.Types.ObjectId(doctorId),
       date: {
-        $gte: start.toISOString(),
-        $lte: now.toISOString(),
+        $gte: start,
+        $lte: end,
       },
     });
 
@@ -538,12 +541,12 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         { status: 'cancelled' },
         {
           status: 'pending',
-          date: { $lt: new Date().toISOString() },
+          date: { $lt: new Date() },
         },
       ],
       date: {
-        $gte: start.toISOString(),
-        $lte: now.toISOString(),
+        $gte: start,
+        $lte: end,
       },
     });
 
@@ -554,8 +557,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         $match: {
           doctorId: new mongoose.Types.ObjectId(doctorId),
           date: {
-            $gte: start.toISOString(),
-            $lte: now.toISOString(),
+            $gte: start,
+            $lte: end,
           },
         },
       },
@@ -580,8 +583,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         $match: {
           doctorId: new mongoose.Types.ObjectId(doctorId),
           date: {
-            $gte: start.toISOString(),
-            $lte: now.toISOString(),
+            $gte: start,
+            $lte: end,
           },
         },
       },
@@ -611,8 +614,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         $match: {
           doctorId: new mongoose.Types.ObjectId(doctorId),
           date: {
-            $gte: start.toISOString(),
-            $lte: now.toISOString(),
+            $gte: start,
+            $lte: end,
           },
         },
       },
@@ -630,6 +633,36 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         },
       },
     ]);
+   
+
+    const totalExpenses = await Appointment.aggregate([
+      {
+        $match: {
+          doctorId: new mongoose.Types.ObjectId(doctorId),
+          status: 'completed',
+        },
+      },
+      {
+        $lookup: {
+          from: 'appointmentdetails',
+          localField: '_id',
+          foreignField: 'appointmentId',
+          as: 'details',
+        },
+      },
+      {
+        $unwind: {
+          path: '$details',
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: { $ifNull: ['$details.tarif', 0] } },
+        },
+      },
+    ]);
 
     res.status(200).json({
       message: 'Statistiques récupérées avec succès.',
@@ -639,6 +672,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       recurrentPatients: recurrentPatients[0]?.recurrentCount || 0,
       peakHours,
       statusDistribution,
+      totalAppointments,
+      totalExpenses: totalExpenses[0]?.total || 0,
     });
   } catch (error) {
     console.error('Erreur lors de la récupération des statistiques:', error);
@@ -670,8 +705,7 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Accès non autorisé.' });
     }
 
-    const now = new Date();
-    let start, groupFormat;
+    let start, end = new Date(), groupFormat;
     if (timeRange === 'day') {
       start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
       groupFormat = '%Y-%m-%d';
@@ -695,10 +729,13 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       if (isNaN(start.getTime())) {
         return res.status(400).json({ error: 'startDate invalide.' });
       }
-      now = new Date(endDate);
-      if (isNaN(now.getTime())) {
+      end = new Date(endDate);
+      if (isNaN(end.getTime())) {
         return res.status(400).json({ error: 'endDate invalide.' });
       }
+      // Inclure toute la journée sélectionnée, même si le sélecteur envoie minuit.
+      end.setHours(23, 59, 59, 999);
+      start.setHours(0, 0, 0, 0);
       groupFormat = '%Y-%m-%d';
     }
 
@@ -706,8 +743,8 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       patientId: new mongoose.Types.ObjectId(patientId),
       status: { $in: ['pending', 'accepted', 'completed', 'cancelled'] },
       date: {
-        $gte: start.toISOString(),
-        $lte: now.toISOString(),
+        $gte: start,
+        $lte: end,
       },
     };
 
@@ -759,9 +796,19 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
 
     console.log("Stats agrégées:", stats);
 
-    const totalAppointments = await Appointment.countDocuments({
-      patientId: new mongoose.Types.ObjectId(patientId),
-    });
+    const totalAppointments = await Appointment.aggregate([
+      {
+        $match: {
+          patientId: new mongoose.Types.ObjectId(patientId),
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
     const totalExpenses = await Appointment.aggregate([
       {
@@ -809,8 +856,8 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
         $match: {
           patientId: new mongoose.Types.ObjectId(patientId),
           date: {
-            $gte: start.toISOString(),
-            $lte: now.toISOString(),
+            $gte: start,
+            $lte: end,
           },
         },
       },
