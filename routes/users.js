@@ -476,14 +476,25 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
     }).select('startDate endDate').lean();
 
     const availableSlots = {};
-    for (const [date, times] of doctor.availability.entries()) {
+    // Les anciens comptes peuvent encore avoir availability stocké comme objet
+    // alors que le schéma Mongoose actuel le convertit en Map.
+    const availabilityEntries = doctor.availability instanceof Map
+      ? doctor.availability.entries()
+      : Object.entries(doctor.availability || {});
+
+    for (const [date, times] of availabilityEntries) {
       const isBlocked = blockedPeriods.some((period) => date >= period.startDate && date <= period.endDate);
       if (date >= startDate && date <= endDate && !isBlocked) {
         const bookedTimes = appointments
-          .filter(apt => apt.date.toISOString().split('T')[0] === date)
+          .filter((apt) => {
+            const appointmentDate = new Date(apt.date);
+            return !Number.isNaN(appointmentDate.getTime())
+              && appointmentDate.toISOString().slice(0, 10) === date;
+          })
           .map(apt => apt.time);
         const offeredTimes = activeOffers.filter(offer => offer.date === date).map(offer => offer.offeredTime);
-        availableSlots[date] = times.filter(time => !bookedTimes.includes(time) && !offeredTimes.includes(time));
+        availableSlots[date] = (Array.isArray(times) ? times : [])
+          .filter(time => !bookedTimes.includes(time) && !offeredTimes.includes(time));
       }
     }
 
