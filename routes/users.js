@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const Appointment = require('../models/Appointment');
+const WaitlistEntry = require('../models/WaitlistEntry');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
 
@@ -293,6 +294,11 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
       date: { $gte: startDate, $lte: endDate },
       status: { $in: ['pending', 'accepted'] },
     });
+    const activeOffers = await WaitlistEntry.find({
+      doctorId,
+      status: { $in: ['offered', 'booking'] },
+      offeredUntil: { $gt: new Date() },
+    }).select('date offeredTime');
 
     const availableSlots = {};
     for (const [date, times] of doctor.availability.entries()) {
@@ -300,7 +306,8 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
         const bookedTimes = appointments
           .filter(apt => apt.date.toISOString().split('T')[0] === date)
           .map(apt => apt.time);
-        availableSlots[date] = times.filter(time => !bookedTimes.includes(time));
+        const offeredTimes = activeOffers.filter(offer => offer.date === date).map(offer => offer.offeredTime);
+        availableSlots[date] = times.filter(time => !bookedTimes.includes(time) && !offeredTimes.includes(time));
       }
     }
 

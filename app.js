@@ -4,11 +4,18 @@ const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const cron = require('node-cron');
 require('dotenv').config();
 const userRoutes = require('./routes/users');
 const appointmentRoutes = require('./routes/appointments');
 const reactionRoutes = require('./routes/reactions');
 const reviewsRouter = require('./routes/reviews');
+const notificationRoutes = require('./routes/notifications');
+const Appointment = require('./models/Appointment');
+const { createNotification } = require('./services/notifications');
+const patientRecordRoutes = require('./routes/patientRecords');
+const waitlistRoutes = require('./routes/waitlist');
+const { expireWaitlistOffers } = require('./services/waitlist');
 const app = express();
 const server = http.createServer(app);
 
@@ -61,5 +68,53 @@ app.use('/api/users', userRoutes);
 app.use('/api/appointments', appointmentRoutes);
 app.use('/api/reactions', reactionRoutes);
 app.use('/api/reviews', reviewsRouter);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/patients', patientRecordRoutes);
+app.use('/api/waitlist', waitlistRoutes);
+
+// Persist in-app reminders for accepted appointments, once per recipient and reminder window.
+cron.schedule('* * * * *', async () => {
+  try {
+    const now = new Date();
+    const appointments = await Appointment.find({
+      status: 'accepted',
+      date: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000), $lte: new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000) },
+    }).select('_id doctorId patientId date time');
+
+    for (const appointment of appointments) {
+      const datePart = new Date(appointment.date).toISOString().slice(0, 10);
+      const appointmentDateTime = new Date(`${datePart}T${appointment.time}:00`);
+      const minutesUntil = (appointmentDateTime.getTime() - now.getTime()) / 60000;
+      let reminder;
+      if (minutesUntil > 23 * 60 && minutesUntil <= 24 * 60) {
+        reminder = { key: '24h', title: 'Rappel de rendez-vous', message: `Votre rendez-vous est prévu demain à ${appointment.time}.` };
+      } else if (minutesUntil > 59 && minutesUntil <= 60) {
+        reminder = { key: '1h', title: 'Rendez-vous bientôt', message: `Votre rendez-vous commence dans environ une heure (${appointment.time}).` };
+      }
+      if (!reminder) continue;
+
+      await Promise.all([appointment.doctorId, appointment.patientId].map((userId) =>
+        createNotification({
+          userId,
+          appointmentId: appointment._id,
+          type: 'reminder',
+          title: reminder.title,
+          message: reminder.message,
+          dedupeKey: `appointment:${appointment._id}:reminder:${reminder.key}:${userId}`,
+        })
+      ));
+    }
+  } catch (error) {
+    console.error('Unable to create appointment reminders:', error.message);
+  }
+});
+
+cron.schedule('* * * * *', async () => {
+  try {
+    await expireWaitlistOffers();
+  } catch (error) {
+    console.error('Unable to rotate expired waitlist offers:', error.message);
+  }
+});
 
 server.listen(PORT, () => console.log(`Serveur en cours d'exécution sur le port ${PORT}`));

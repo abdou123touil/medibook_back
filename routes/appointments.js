@@ -6,6 +6,10 @@ const AppointmentDetails = require('../models/AppointmentDetails');
 const Teleconsultation = require('../models/teleconsultation');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
+const { notifyAppointmentParticipants, createNotification } = require('../services/notifications');
+const WaitlistEntry = require('../models/WaitlistEntry');
+const Notification = require('../models/Notification');
+const { offerNextWaitlistPatient } = require('../services/waitlist');
 const router = express.Router();
 
 // Créer un rendez-vous
@@ -40,6 +44,17 @@ router.post('/', authenticateToken, async (req, res) => {
     const availableSlots = doctor.availability.get(dateKey) || [];
     if (!availableSlots.includes(time)) {
       return res.status(400).json({ error: 'Ce créneau n\'est pas disponible.' });
+    }
+
+    const activeWaitlistOffer = await WaitlistEntry.findOne({
+      doctorId,
+      date: dateKey,
+      offeredTime: time,
+      status: { $in: ['offered', 'booking'] },
+      offeredUntil: { $gt: new Date() },
+    });
+    if (activeWaitlistOffer && activeWaitlistOffer.patientId.toString() !== patientId) {
+      return res.status(409).json({ error: 'Ce créneau est temporairement réservé à un patient de la liste d’attente.' });
     }
 
     const existingAppointment = await Appointment.findOne({
@@ -88,6 +103,22 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     await appointment.save();
+
+    if (activeWaitlistOffer) {
+      activeWaitlistOffer.status = 'booked';
+      activeWaitlistOffer.appointmentId = appointment._id;
+      activeWaitlistOffer.offeredUntil = null;
+      await activeWaitlistOffer.save();
+      await Notification.updateMany({ waitlistEntryId: activeWaitlistOffer._id }, { $set: { action: null } });
+    }
+
+    await notifyAppointmentParticipants(appointment, {
+      title: 'Nouveau rendez-vous',
+      message: doctor.requiresConfirmation
+        ? 'Une demande de rendez-vous attend votre confirmation.'
+        : 'Un nouveau rendez-vous a été réservé.',
+      dedupeKey: `appointment:${appointment._id}:created`,
+    });
 
     const populatedAppointment = await Appointment.findById(appointment._id)
       .populate('doctorId', 'firstName lastName speciality')
@@ -192,6 +223,15 @@ router.put('/:appointmentId/accept', authenticateToken, async (req, res) => {
     }
     await appointment.save();
 
+    await createNotification({
+      userId: appointment.patientId,
+      appointmentId: appointment._id,
+      type: 'appointment',
+      title: 'Rendez-vous confirmé',
+      message: 'Le médecin a confirmé votre rendez-vous.',
+      dedupeKey: `appointment:${appointment._id}:accepted:patient`,
+    });
+
     // Mettre à jour la téléconsultation associée
     if (appointment.isTeleconsultation) {
       await Teleconsultation.updateOne(
@@ -241,6 +281,19 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
       appointment.teleconsultation.status = 'cancelled';
     }
     await appointment.save();
+
+    await offerNextWaitlistPatient(
+      appointment.doctorId,
+      appointment.date.toISOString().slice(0, 10),
+      appointment.time,
+      appointment._id
+    );
+
+    await notifyAppointmentParticipants(appointment, {
+      title: 'Rendez-vous annulé',
+      message: 'Un rendez-vous a été annulé.',
+      dedupeKey: `appointment:${appointment._id}:cancelled`,
+    });
 
     // Mettre à jour la téléconsultation associée
     if (appointment.isTeleconsultation) {
@@ -294,6 +347,15 @@ router.put('/:appointmentId/complete', authenticateToken, async (req, res) => {
       appointment.teleconsultation.status = 'completed';
     }
     await appointment.save();
+
+    await createNotification({
+      userId: appointment.patientId,
+      appointmentId: appointment._id,
+      type: 'appointment',
+      title: 'Consultation terminée',
+      message: 'Votre consultation est terminée. Le médecin peut ajouter le compte rendu à votre fiche.',
+      dedupeKey: `appointment:${appointment._id}:completed:patient`,
+    });
 
     // Mettre à jour la téléconsultation associée
     if (appointment.isTeleconsultation) {
@@ -705,7 +767,8 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Accès non autorisé.' });
     }
 
-    let start, end = new Date(), groupFormat;
+    const now = new Date();
+    let start, end = now, groupFormat;
     if (timeRange === 'day') {
       start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
       groupFormat = '%Y-%m-%d';
@@ -796,19 +859,9 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
 
     console.log("Stats agrégées:", stats);
 
-    const totalAppointments = await Appointment.aggregate([
-      {
-        $match: {
-          patientId: new mongoose.Types.ObjectId(patientId),
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-        },
-      },
-    ]);
+    const totalAppointments = await Appointment.countDocuments({
+      patientId: new mongoose.Types.ObjectId(patientId),
+    });
 
     const totalExpenses = await Appointment.aggregate([
       {
