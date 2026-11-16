@@ -636,30 +636,37 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       },
     ]);
 
-    const incompleteDetailsCount = await Appointment.aggregate([
-      {
-        $match: {
-          doctorId: new mongoose.Types.ObjectId(doctorId),
-          status: 'completed',
-        },
-      },
-      {
-        $lookup: {
-          from: 'appointmentdetails',
-          localField: '_id',
-          foreignField: 'appointmentId',
-          as: 'details',
-        },
-      },
-      {
-        $match: {
-          details: { $size: 0 },
-        },
-      },
-      {
-        $count: 'count',
-      },
-    ]);
+    const completedAppointmentsForDetails = await Appointment.find({
+      doctorId: new mongoose.Types.ObjectId(doctorId),
+      status: 'completed',
+    }).populate('patientId', 'firstName lastName').sort({ date: -1, time: -1 }).lean();
+    const completedAppointmentIds = completedAppointmentsForDetails.map((appointment) => appointment._id);
+    const detailRecords = completedAppointmentIds.length
+      ? await AppointmentDetails.find({ appointmentId: { $in: completedAppointmentIds } }).select('appointmentId').lean()
+      : [];
+    const appointmentIdsWithLegacyDetails = new Set(detailRecords.map((detail) => String(detail.appointmentId)));
+    const patientIds = [...new Set(completedAppointmentsForDetails.map((appointment) => String(appointment.patientId?._id || appointment.patientId)))];
+    const patientRecords = patientIds.length
+      ? await PatientRecord.find({ doctorId: new mongoose.Types.ObjectId(doctorId), patientId: { $in: patientIds } })
+        .select('patientId consultations.appointmentId consultations.diagnosis consultations.treatment consultations.notes consultations.prescriptions')
+        .lean()
+      : [];
+    const appointmentIdsWithClinicalDetails = new Set();
+    for (const record of patientRecords) {
+      for (const consultation of record.consultations || []) {
+        const hasDetails = Boolean(
+          consultation.diagnosis?.trim()
+          || consultation.treatment?.trim()
+          || consultation.notes?.trim()
+          || consultation.prescriptions?.length
+        );
+        if (hasDetails) appointmentIdsWithClinicalDetails.add(String(consultation.appointmentId));
+      }
+    }
+    const incompleteAppointments = completedAppointmentsForDetails.filter((appointment) =>
+      !appointmentIdsWithLegacyDetails.has(String(appointment._id))
+      && !appointmentIdsWithClinicalDetails.has(String(appointment._id))
+    );
 
     const totalAppointments = await Appointment.countDocuments({
       doctorId: new mongoose.Types.ObjectId(doctorId),
@@ -801,7 +808,8 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
     res.status(200).json({
       message: 'Statistiques récupérées avec succès.',
       stats,
-      incompleteDetailsCount: incompleteDetailsCount[0]?.count || 0,
+      incompleteDetailsCount: incompleteAppointments.length,
+      incompleteAppointments,
       noShowRate: parseFloat(noShowRate.toFixed(2)),
       recurrentPatients: recurrentPatients[0]?.recurrentCount || 0,
       peakHours,

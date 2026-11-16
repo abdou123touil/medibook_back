@@ -11,6 +11,17 @@ const DoctorAbsence = require('../models/DoctorAbsence');
 
 const router = express.Router();
 
+function prescriptionText(value) {
+  if (typeof value === 'string') return value.trim() === '[object Object]' ? '' : value.trim();
+  if (typeof value === 'number') return String(value);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  for (const key of ['name', 'medication', 'medicament', 'drugName', 'medicationName', 'genericName', 'displayName', 'label', 'value', 'text']) {
+    const text = prescriptionText(value[key]);
+    if (text) return text;
+  }
+  return '';
+}
+
 function includeLegacyConsultations(record, appointments, details) {
   const consultations = [...(record?.consultations || [])];
   const knownAppointments = new Set(consultations.map((entry) => String(entry.appointmentId)));
@@ -164,7 +175,20 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         diagnosis: String(consultation.diagnosis || '').slice(0, 2000),
         treatment: String(consultation.treatment || '').slice(0, 4000),
         prescriptions: Array.isArray(consultation.prescriptions)
-          ? consultation.prescriptions.map((item) => String(item).trim()).filter(Boolean).slice(0, 30)
+          ? consultation.prescriptions.map((item) => {
+            if (typeof item === 'string') return prescriptionText(item).slice(0, 300) || null;
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+            const prescription = {
+              name: prescriptionText(item.name || item.medication || item.medicament || item.drugName || item.medicationName || item.genericName).slice(0, 200),
+              dosage: prescriptionText(item.dosage).slice(0, 100),
+              route: prescriptionText(item.route).slice(0, 100),
+              frequency: prescriptionText(item.frequency).slice(0, 150),
+              duration: prescriptionText(item.duration).slice(0, 100),
+              quantity: prescriptionText(item.quantity).slice(0, 100),
+              instructions: prescriptionText(item.instructions).slice(0, 500),
+            };
+            return prescription.name ? prescription : null;
+          }).filter(Boolean).slice(0, 30)
           : [],
         notes: String(consultation.notes || '').slice(0, 4000),
         followUpAt: consultation.followUpAt ? new Date(consultation.followUpAt) : null,

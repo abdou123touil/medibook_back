@@ -6,7 +6,8 @@ const consultationSchema = new mongoose.Schema({
   symptoms: { type: String, default: '', maxlength: 2000 },
   diagnosis: { type: String, default: '', maxlength: 2000 },
   treatment: { type: String, default: '', maxlength: 4000 },
-  prescriptions: { type: [String], default: [] },
+  // Mixed keeps older string-only prescriptions readable while allowing structured regimens.
+  prescriptions: { type: [mongoose.Schema.Types.Mixed], default: [] },
   notes: { type: String, default: '', maxlength: 4000 },
   followUpAt: { type: Date, default: null },
   followUpAppointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', default: null },
