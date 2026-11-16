@@ -1,12 +1,15 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Chat = require('../models/Chat');
+const Appointment = require('../models/Appointment');
+const authenticateToken = require('../middleware/authenticateToken');
+const { isConversationParticipant } = require('../services/accessControl');
 require('dotenv').config();
 const { OpenAI } = require('openai');
 
 // Configuration de l'API AIML
 const baseURL = 'https://api.aimlapi.com/v1';
-const apiKey = process.env.AIML_API_KEY;
+const apiKey = process.env.AIML_API_KEY || process.env.OPENAI_API_KEY;
 
 const api = new OpenAI({
   apiKey,
@@ -35,9 +38,9 @@ module.exports = function (io) {
   io.on('connection', (socket) => {
     console.log(`New client connected in chat.js: ${socket.id}`);
 
-    socket.on('botMessage', async (data) => {
+    socket.on('botMessage', async (data = {}) => {
       const { message, userId, conversationId } = data;
-      console.log('Received botMessage:', { message, userId, conversationId });
+      if (String(socket.data.user.id) !== String(userId) || conversationId !== 'bot_medical_advisor' || typeof message !== 'string' || !message.trim() || message.length > 2000) return;
 
       try {
         const aiResponse = await callMedicalAI(message);
@@ -61,7 +64,7 @@ module.exports = function (io) {
         };
 
         console.log('Emitting bot response:', botMessage);
-        io.to(conversationId).emit('newMessage', botMessage);
+        socket.emit('newMessage', botMessage);
       } catch (err) {
         console.error('Error processing bot message:', err.message, err.stack);
         const errorMessage = {
@@ -82,12 +85,15 @@ module.exports = function (io) {
           readAt: null,
         };
         console.log('Emitting error message:', errorMessage);
-        io.to(conversationId).emit('newMessage', errorMessage);
+        socket.emit('newMessage', errorMessage);
       }
     });
 
-    socket.on('markAsRead', async ({ conversationId, userId }) => {
+    socket.on('markAsRead', async ({ conversationId, userId } = {}) => {
       try {
+        if (String(socket.data.user.id) !== String(userId)) return;
+        const ids = typeof conversationId === 'string' ? conversationId.replace(/^conv_/, '').split('_') : [];
+        if (ids.length !== 2 || !ids.includes(String(userId)) || ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return;
         const updated = await Chat.updateMany(
           {
             conversationId,
@@ -130,7 +136,6 @@ module.exports = function (io) {
         max_tokens: 500,
       });
 
-      console.log('AIML API response:', completion);
       return completion.choices[0].message.content.trim() || 'Désolé, je ne peux pas répondre à cela pour le moment.';
     } catch (err) {
       console.error('Error calling AIML API:', err.message, err.stack);
@@ -139,12 +144,14 @@ module.exports = function (io) {
   }
 
   // Route pour récupérer les conversations d'un utilisateur
-  router.get('/user/:userId', async (req, res) => {
+  router.get('/user/:userId', authenticateToken, async (req, res) => {
     try {
+      if (String(req.user.id) !== String(req.params.userId)) return res.status(403).json({ error: 'Accès non autorisé.' });
+      const authenticatedUserId = new mongoose.Types.ObjectId(req.user.id);
       const conversations = await Chat.aggregate([
         {
           $match: {
-            $or: [{ senderId: req.params.userId }, { receiverId: req.params.userId }],
+            $or: [{ senderId: authenticatedUserId }, { receiverId: authenticatedUserId }],
           },
         },
         {
@@ -178,7 +185,7 @@ module.exports = function (io) {
                 $cond: [
                   {
                     $and: [
-                      { $eq: ['$receiverId', req.params.userId] },
+                      { $eq: ['$receiverId', authenticatedUserId] },
                       { $eq: ['$readAt', null] },
                     ],
                   },
@@ -213,7 +220,9 @@ module.exports = function (io) {
           conversationId: conv._id.conversationId,
           lastMessage: conv.lastMessage,
           unreadCount: conv.unreadCount,
-          participants: [conv.sender[0], conv.receiver[0]],
+          participants: [conv.sender[0], conv.receiver[0]]
+            .filter(Boolean)
+            .map(({ _id, firstName, lastName }) => ({ _id, firstName, lastName })),
         }))
       );
     } catch (err) {
@@ -223,8 +232,19 @@ module.exports = function (io) {
   });
 
   // Route pour récupérer les messages d'une conversation
-  router.get('/conversation/:userId1/:userId2', async (req, res) => {
+  router.get('/conversation/:userId1/:userId2', authenticateToken, async (req, res) => {
     try {
+      const { userId1, userId2 } = req.params;
+      if (![userId1, userId2].every(mongoose.Types.ObjectId.isValid) || !isConversationParticipant(req.user.id, userId1, userId2)) {
+        return res.status(403).json({ error: 'Accès non autorisé.' });
+      }
+      const hasAppointment = await Appointment.exists({
+        $or: [
+          { doctorId: userId1, patientId: userId2 },
+          { doctorId: userId2, patientId: userId1 },
+        ],
+      });
+      if (!hasAppointment) return res.status(403).json({ error: 'Aucune consultation commune.' });
       const conversationId = getConversationId(req.params.userId1, req.params.userId2);
 
       const messages = await Chat.find({
@@ -245,12 +265,11 @@ module.exports = function (io) {
   });
 
   // Route pour envoyer un message
-  router.post('/', async (req, res) => {
+  router.post('/', authenticateToken, async (req, res) => {
     const { senderId, receiverId, content, appointmentId } = req.body;
 
-    console.log('Received POST /api/chat body:', { senderId, receiverId, content, appointmentId });
 
-    if (!senderId || !receiverId || !content) {
+    if (!senderId || !receiverId || typeof content !== 'string' || !content.trim() || content.length > 5000 || String(senderId) !== String(req.user.id) || !mongoose.Types.ObjectId.isValid(receiverId)) {
       console.error('Missing required fields:', { senderId, receiverId, content });
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -259,44 +278,44 @@ module.exports = function (io) {
       // Convertir explicitement en chaînes pour éviter les problèmes avec ObjectId
       const senderIdStr = String(senderId);
       const receiverIdStr = String(receiverId);
+      const appointmentFilter = {
+        $or: [
+          { doctorId: senderIdStr, patientId: receiverIdStr },
+          { doctorId: receiverIdStr, patientId: senderIdStr },
+        ],
+      };
+      if (appointmentId) {
+        if (!mongoose.Types.ObjectId.isValid(appointmentId)) return res.status(400).json({ error: 'Rendez-vous invalide.' });
+        appointmentFilter._id = appointmentId;
+      }
+      const hasAppointment = await Appointment.exists(appointmentFilter);
+      if (!hasAppointment) return res.status(403).json({ error: 'Aucune consultation commune.' });
       const conversationId = getConversationId(senderIdStr, receiverIdStr);
 
       const newMessage = new Chat({
         senderId: new mongoose.Types.ObjectId(senderId),
         receiverId: new mongoose.Types.ObjectId(receiverId),
-        content,
+        content: content.trim(),
         appointmentId: appointmentId || null,
         conversationId,
       });
 
-      console.log('New message before save:', newMessage);
-
       const savedMessage = await newMessage.save();
-      console.log('Saved message:', savedMessage);
 
       const populatedMessage = await Chat.populate(savedMessage, [
         { path: 'senderId', select: 'firstName lastName' },
         { path: 'receiverId', select: 'firstName lastName' },
       ]);
 
-      console.log('Populated message:', populatedMessage);
-
       // Vérifier les clients dans la salle
       const clientsInRoom = io.sockets.adapter.rooms.get(conversationId);
-      console.log(`Clients in room ${conversationId}:`, clientsInRoom ? Array.from(clientsInRoom) : 'None');
-
-      console.log(`Emitting newMessage to conversation ${conversationId}:`, populatedMessage);
       io.to(conversationId).emit('newMessage', populatedMessage);
 
       // Éviter d'émettre deux fois au même client
       if (appointmentId) {
         const appointmentClients = io.sockets.adapter.rooms.get(appointmentId);
-        console.log(`Clients in appointment room ${appointmentId}:`, appointmentClients ? Array.from(appointmentClients) : 'None');
         if (appointmentClients && !clientsInRoom?.has(appointmentClients)) {
-          console.log(`Emitting newMessage to appointment ${appointmentId}:`, populatedMessage);
           io.to(appointmentId).emit('newMessage', populatedMessage);
-        } else {
-          console.log(`Skipping duplicate emission to appointment ${appointmentId}`);
         }
       }
 
@@ -308,9 +327,13 @@ module.exports = function (io) {
   });
 
   // Route pour marquer les messages comme lus
-  router.patch('/:conversationId/read', async (req, res) => {
+  router.patch('/:conversationId/read', authenticateToken, async (req, res) => {
     try {
-      const { userId } = req.body;
+      const userId = String(req.user.id);
+      const ids = req.params.conversationId.replace(/^conv_/, '').split('_');
+      if (ids.length !== 2 || !ids.includes(userId) || ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+        return res.status(403).json({ error: 'Accès non autorisé.' });
+      }
       const updated = await Chat.updateMany(
         {
           conversationId: req.params.conversationId,

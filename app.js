@@ -6,6 +6,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const cron = require('node-cron');
 require('dotenv').config();
+const jwt = require('jsonwebtoken');
+const { jwtSecret } = require('./config/security');
 const userRoutes = require('./routes/users');
 const appointmentRoutes = require('./routes/appointments');
 const reactionRoutes = require('./routes/reactions');
@@ -21,7 +23,7 @@ const { sendAppointmentReminderEmail, retryFailedAppointmentReminderEmails } = r
 const app = express();
 const server = http.createServer(app);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(cors({
   origin: 'http://localhost:5173',
@@ -33,7 +35,7 @@ app.use(bodyParser.json());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-mongoose.connect('mongodb://localhost:27017/doctorBooking')
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/doctorBooking')
   .then(() => console.log('MongoDB connecté'))
   .catch((err) => console.error('Erreur de connexion MongoDB:', err));
 
@@ -45,18 +47,35 @@ const io = new Server(server, {
   },
 });
 
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) return next(new Error('Authentification requise.'));
+  jwt.verify(token, jwtSecret, (error, user) => {
+    if (error) return next(new Error('Jeton invalide.'));
+    socket.data.user = user;
+    next();
+  });
+});
+
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
-  socket.on('joinConversation', (conversationId) => {
-    socket.join(conversationId);
-    console.log(`Client ${socket.id} joined conversation ${conversationId}`);
-    console.log(`Client ${socket.id} rooms:`, Array.from(socket.rooms));
+  socket.on('joinConversation', async (conversationId) => {
+    const userId = String(socket.data.user.id);
+    const ids = typeof conversationId === 'string' ? conversationId.replace(/^conv_/, '').split('_') : [];
+    if (ids.length !== 2 || !ids.includes(userId) || ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return;
+    const hasAppointment = await Appointment.exists({
+      $or: [
+        { doctorId: ids[0], patientId: ids[1] },
+        { doctorId: ids[1], patientId: ids[0] },
+      ],
+    });
+    if (hasAppointment) socket.join(conversationId);
   });
 
   socket.on('leaveConversation', (conversationId) => {
-    socket.leave(conversationId);
-    console.log(`Client ${socket.id} left conversation ${conversationId}`);
+    const ids = typeof conversationId === 'string' ? conversationId.replace(/^conv_/, '').split('_') : [];
+    if (ids.length === 2 && ids.includes(String(socket.data.user.id))) socket.leave(conversationId);
   });
 
   socket.on('disconnect', () => {

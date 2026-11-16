@@ -7,10 +7,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
+    env_file:
+      - .env.local
     environment:
       - PORT=3000
-      - JWT_SECRET=abdou1920touil
-      - MONGODB_URI=mongodb://mongo:27017/doctorBooking
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017/doctorBooking}
     depends_on:
       - mongo
     networks:

@@ -11,9 +11,10 @@ const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
 const { buildAvailableSlots } = require('../services/availableSlots');
 const { removeAvailabilityInRange, restoreAvailability } = require('../services/doctorAbsenceRules');
+const { isDoctorOwner } = require('../services/accessControl');
+const { jwtSecret } = require('../config/security');
 
 const router = express.Router();
-const JWT_SECRET = 'abdou123touil';
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -119,7 +120,7 @@ router.post('/register', registrationUpload, async (req, res) => {
 
     await user.save();
 
-    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, jwtSecret, { expiresIn: '24h' });
     res.status(201).json({
       message: 'Utilisateur enregistré avec succès.',
       token,
@@ -157,7 +158,7 @@ router.post('/login', async (req, res) => {
         role: user.role,
         email: user.email,
       },
-      JWT_SECRET,
+      jwtSecret,
       { expiresIn: '24h' }
     );
 
@@ -201,7 +202,9 @@ router.post('/login', async (req, res) => {
 // Récupérer le profil de l'utilisateur connecté
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const user = await User.findById(req.user.id).select(
+      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName availability requiresConfirmation'
+    );
     if (!user) {
       return res.status(404).json({ error: 'Utilisateur non trouvé.' });
     }
@@ -280,6 +283,10 @@ router.put('/profile', authenticateToken, upload.fields([
 router.put('/update-availability', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
+    const doctor = await User.findById(userId).select('_id role');
+    if (!isDoctorOwner(doctor, userId)) {
+      return res.status(403).json({ error: 'Cette action est réservée aux médecins.' });
+    }
     let { availability } = req.body;
 
     // Valider availability
@@ -481,9 +488,9 @@ router.put('/doctor-absence/:absenceId/cancel', authenticateToken, async (req, r
 // Récupérer la disponibilité
 router.get('/get-availability', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.query.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'Utilisateur non trouvé.' });
+    const user = await User.findById(req.user.id).select('_id role availability requiresConfirmation');
+    if (!isDoctorOwner(user, req.user.id)) {
+      return res.status(403).json({ error: 'Cette action est réservée aux médecins.' });
     }
     res.json({ availability: Object.fromEntries(user.availability || new Map()), requiresConfirmation: user.requiresConfirmation });
   } catch (error) {
@@ -550,7 +557,7 @@ router.get('/doctors', async (req, res) => {
   try {
     const doctors = await User.find(
       { role: 'doctor' },
-      'firstName lastName speciality description hospitalName location availability requiresConfirmation'
+      'firstName lastName speciality description hospitalName location requiresConfirmation'
     );
     res.json(doctors);
   } catch (error) {
