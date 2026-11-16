@@ -17,6 +17,7 @@ const patientRecordRoutes = require('./routes/patientRecords');
 const waitlistRoutes = require('./routes/waitlist');
 const { expireWaitlistOffers } = require('./services/waitlist');
 const { expirePastPendingAppointments } = require('./services/appointmentLifecycle');
+const { sendAppointmentReminderEmail, retryFailedAppointmentReminderEmails } = require('./services/emailReminders');
 const app = express();
 const server = http.createServer(app);
 
@@ -80,31 +81,52 @@ cron.schedule('* * * * *', async () => {
     const appointments = await Appointment.find({
       status: 'accepted',
       date: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000), $lte: new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000) },
-    }).select('_id doctorId patientId date time');
+    })
+      .select('_id doctorId patientId date time')
+      .populate('patientId', 'firstName email')
+      .populate('doctorId', 'firstName lastName');
 
     for (const appointment of appointments) {
       const datePart = new Date(appointment.date).toISOString().slice(0, 10);
       const appointmentDateTime = new Date(`${datePart}T${appointment.time}:00`);
       const minutesUntil = (appointmentDateTime.getTime() - now.getTime()) / 60000;
       let reminder;
+      let emailReminderKey;
       if (minutesUntil > 23 * 60 && minutesUntil <= 24 * 60) {
         reminder = { key: '24h', title: 'Rappel de rendez-vous', message: `Votre rendez-vous est prévu demain à ${appointment.time}.` };
       } else if (minutesUntil > 59 && minutesUntil <= 60) {
         reminder = { key: '1h', title: 'Rendez-vous bientôt', message: `Votre rendez-vous commence dans environ une heure (${appointment.time}).` };
       }
-      if (!reminder) continue;
 
-      await Promise.all([appointment.doctorId, appointment.patientId].map((userId) =>
-        createNotification({
-          userId,
-          appointmentId: appointment._id,
-          type: 'reminder',
-          title: reminder.title,
-          message: reminder.message,
-          dedupeKey: `appointment:${appointment._id}:reminder:${reminder.key}:${userId}`,
-        })
-      ));
+      if (minutesUntil > 23 * 60 && minutesUntil <= 24 * 60) {
+        emailReminderKey = '24h';
+      } else if (minutesUntil > 110 && minutesUntil <= 120) {
+        emailReminderKey = '2h';
+      }
+
+      if (reminder) {
+        await Promise.all([appointment.doctorId, appointment.patientId].map((user) =>
+          createNotification({
+            userId: user?._id || user,
+            appointmentId: appointment._id,
+            type: 'reminder',
+            title: reminder.title,
+            message: reminder.message,
+            dedupeKey: `appointment:${appointment._id}:reminder:${reminder.key}:${user?._id || user}`,
+          })
+        ));
+      }
+
+      if (emailReminderKey && appointment.patientId?.email) {
+        await sendAppointmentReminderEmail({
+          appointment,
+          patient: appointment.patientId,
+          doctor: appointment.doctorId,
+          reminderKey: emailReminderKey,
+        });
+      }
     }
+    await retryFailedAppointmentReminderEmails();
   } catch (error) {
     console.error('Unable to create appointment reminders:', error.message);
   }
