@@ -29,7 +29,7 @@ const sessionCookieOptions = {
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024, files: 3 },
+  limits: { fileSize: 2 * 1024 * 1024, files: 4 },
   fileFilter: (_req, file, callback) => {
     if (!file.mimetype.startsWith('image/')) {
       return callback(new Error('Les pièces jointes doivent être des images.'));
@@ -41,24 +41,48 @@ const registrationUpload = (req, res, next) => upload.fields([
   { name: 'profileImage', maxCount: 1 },
   { name: 'cinFront', maxCount: 1 },
   { name: 'cinBack', maxCount: 1 },
+  { name: 'doctorLogo', maxCount: 1 },
 ])(req, res, (error) => {
   if (error) return res.status(400).json({ error: error.message || 'Fichier image invalide.' });
   next();
 });
 
+function normalizePhoneNumber(value) {
+  if (typeof value !== 'string') return null;
+  const phone = value.trim();
+  const compact = phone.replace(/[\s().-]/g, '');
+  return /^\+?\d{8,15}$/.test(compact) ? phone : null;
+}
+
+function parseBirthDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value || value > new Date().toISOString().slice(0, 10)) return null;
+  return date;
+}
+
+function isValidDoctorLogo(file) {
+  if (!file) return true;
+  if (file.mimetype === 'image/png') return file.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (file.mimetype === 'image/jpeg') return file.buffer[0] === 0xff && file.buffer[1] === 0xd8 && file.buffer[2] === 0xff;
+  return false;
+}
+
 // Inscription
 router.post('/register', registrationUpload, async (req, res) => {
   try {
-    let { firstName, lastName, cinNumber, address, phoneNumber, email, password, role, speciality, hospitalName, availability, lat, lng } = req.body;
+    let { firstName, lastName, cinNumber, address, phoneNumber, dateOfBirth, email, password, role, speciality, hospitalName, availability, lat, lng } = req.body;
 
     firstName = typeof firstName === 'string' ? firstName.trim() : '';
     lastName = typeof lastName === 'string' ? lastName.trim() : '';
     email = typeof email === 'string' ? email.trim().toLowerCase() : '';
     cinNumber = typeof cinNumber === 'string' ? cinNumber.trim() : '';
     address = typeof address === 'string' ? address.trim() : '';
+    phoneNumber = normalizePhoneNumber(phoneNumber);
     if (firstName.length < 2 || lastName.length < 2 || cinNumber.length < 4 || address.length < 5) {
       return res.status(400).json({ error: 'Renseignez un prénom, un nom, un CIN et une adresse valides.' });
     }
+    if (!phoneNumber) return res.status(400).json({ error: 'Un numéro de téléphone valide est obligatoire.' });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: 'Adresse e-mail invalide.' });
     }
@@ -68,6 +92,11 @@ router.post('/register', registrationUpload, async (req, res) => {
     if (!['client', 'doctor'].includes(role)) {
       return res.status(400).json({ error: 'Type de compte invalide.' });
     }
+    const birthDate = role === 'client' ? parseBirthDate(dateOfBirth) : null;
+    if (role === 'client' && !birthDate) return res.status(400).json({ error: 'Une date de naissance valide est obligatoire pour le patient.' });
+    const doctorLogoFile = req.files?.doctorLogo?.[0];
+    if (doctorLogoFile && role !== 'doctor') return res.status(400).json({ error: 'Le logo est réservé aux comptes médecin.' });
+    if (doctorLogoFile && !isValidDoctorLogo(doctorLogoFile)) return res.status(400).json({ error: 'Le logo doit être un fichier PNG ou JPEG valide.' });
     const latitude = Number(lat);
     const longitude = Number(lng);
     if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
@@ -118,12 +147,15 @@ router.post('/register', registrationUpload, async (req, res) => {
       cinNumber,
       address,
       phoneNumber,
+      dateOfBirth: birthDate,
       location: { lat: latitude, lng: longitude },
       speciality: role === 'doctor' ? speciality.trim() : undefined,
       hospitalName: role === 'doctor' ? hospitalName.trim() : undefined,
       availability: role === 'doctor' ? availability : {},
       requiresConfirmation: role === 'doctor' ? false : null,
       profileImage: req.files['profileImage'] ? req.files['profileImage'][0].buffer.toString('base64') : null,
+      doctorLogo: doctorLogoFile ? doctorLogoFile.buffer.toString('base64') : null,
+      doctorLogoMimeType: doctorLogoFile ? doctorLogoFile.mimetype : null,
       cinFrontImage: req.files['cinFront'] ? req.files['cinFront'][0].buffer.toString('base64') : null,
       cinBackImage: req.files['cinBack'] ? req.files['cinBack'][0].buffer.toString('base64') : null
     });
@@ -133,7 +165,7 @@ router.post('/register', registrationUpload, async (req, res) => {
     const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, jwtSecret, { expiresIn: '24h' });
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions).status(201).json({
       message: 'Utilisateur enregistré avec succès.',
-      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email, role: user.role }
+      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email, role: user.role, phoneNumber: user.phoneNumber, dateOfBirth: user.dateOfBirth }
     });
   } catch (error) {
     console.error('Erreur lors de l\'inscription:', error);
@@ -201,7 +233,7 @@ router.post('/logout', (_req, res) => {
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName professionalRegistrationNumber documentHeader documentFooter availability requiresConfirmation reminderPreferences'
+      'firstName lastName email role phoneNumber dateOfBirth address location profileImage speciality description hospitalName professionalRegistrationNumber documentHeader documentFooter doctorLogo doctorLogoMimeType availability requiresConfirmation reminderPreferences'
     );
     if (!user) {
       return res.status(404).json({ error: 'Utilisateur non trouvé.' });
@@ -215,15 +247,29 @@ router.get('/profile', authenticateToken, async (req, res) => {
 
 // Mettre à jour le profil de l'utilisateur
 router.put('/profile', authenticateToken, upload.fields([
-  { name: 'profileImage', maxCount: 1 }
+  { name: 'profileImage', maxCount: 1 },
+  { name: 'doctorLogo', maxCount: 1 },
 ]), async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber, address, email, speciality, hospitalName, professionalRegistrationNumber, documentHeader, documentFooter, lat, lng, requiresConfirmation } = req.body;
+    const { firstName, lastName, phoneNumber, dateOfBirth, address, email, speciality, hospitalName, professionalRegistrationNumber, documentHeader, documentFooter, lat, lng, requiresConfirmation } = req.body;
     const user = await User.findById(req.user.id);
 
     if (!user) {
       return res.status(404).json({ error: 'Utilisateur non trouvé.' });
     }
+
+    const nextPhoneNumber = phoneNumber === undefined ? normalizePhoneNumber(user.phoneNumber) : normalizePhoneNumber(phoneNumber);
+    if (!nextPhoneNumber) return res.status(400).json({ error: 'Un numéro de téléphone valide est obligatoire.' });
+    if (user.role === 'client') {
+      const nextBirthDate = dateOfBirth === undefined
+        ? (user.dateOfBirth ? parseBirthDate(user.dateOfBirth.toISOString().slice(0, 10)) : null)
+        : parseBirthDate(dateOfBirth);
+      if (!nextBirthDate) return res.status(400).json({ error: 'Une date de naissance valide est obligatoire pour le patient.' });
+      user.dateOfBirth = nextBirthDate;
+    }
+    const doctorLogoFile = req.files?.doctorLogo?.[0];
+    if (doctorLogoFile && user.role !== 'doctor') return res.status(400).json({ error: 'Le logo est réservé aux comptes médecin.' });
+    if (doctorLogoFile && !isValidDoctorLogo(doctorLogoFile)) return res.status(400).json({ error: 'Le logo doit être un fichier PNG ou JPEG valide.' });
 
     // Vérifier si l'email est modifié et s'il est unique
     if (email && email !== user.email) {
@@ -237,7 +283,7 @@ router.put('/profile', authenticateToken, upload.fields([
     // Mettre à jour les champs
     user.firstName = firstName || user.firstName;
     user.lastName = lastName || user.lastName;
-    user.phoneNumber = phoneNumber || user.phoneNumber;
+    user.phoneNumber = nextPhoneNumber;
     user.address = address || user.address;
     user.location = {
       lat: lat ? parseFloat(lat) : user.location?.lat,
@@ -254,6 +300,10 @@ router.put('/profile', authenticateToken, upload.fields([
     if (req.files?.['profileImage']) {
       user.profileImage = req.files['profileImage'][0].buffer.toString('base64');
     }
+    if (doctorLogoFile) {
+      user.doctorLogo = doctorLogoFile.buffer.toString('base64');
+      user.doctorLogoMimeType = doctorLogoFile.mimetype;
+    }
 
     await user.save();
 
@@ -265,6 +315,7 @@ router.put('/profile', authenticateToken, upload.fields([
         lastName: user.lastName,
         email: user.email,
         phoneNumber: user.phoneNumber,
+        dateOfBirth: user.dateOfBirth,
         address: user.address,
         location: user.location,
         role: user.role,
@@ -274,6 +325,8 @@ router.put('/profile', authenticateToken, upload.fields([
         documentHeader: user.documentHeader,
         documentFooter: user.documentFooter,
         profileImage: user.profileImage,
+        doctorLogo: user.doctorLogo,
+        doctorLogoMimeType: user.doctorLogoMimeType,
         requiresConfirmation: user.requiresConfirmation
       }
     });

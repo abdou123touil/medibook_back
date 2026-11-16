@@ -165,7 +165,7 @@ router.get('/:patientId/record', authenticateToken, async (req, res) => {
     const doctor = await getDoctorForRequest(req);
     if (!doctor) return res.status(403).json({ error: 'Réservé au médecin traitant.' });
 
-    const patient = await User.findOne({ _id: patientId, role: 'client' }).select('_id firstName lastName');
+    const patient = await User.findOne({ _id: patientId, role: 'client' }).select('_id firstName lastName dateOfBirth');
     if (!patient) return res.status(404).json({ error: 'Patient introuvable.' });
 
     const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } });
@@ -239,7 +239,7 @@ router.get('/me/records', authenticateToken, async (req, res) => {
 router.get('/me/export', authenticateToken, async (req, res) => {
   try {
     const patient = await User.findById(req.user.id)
-      .select('firstName lastName email phoneNumber address location role profileImage createdAt');
+      .select('firstName lastName email phoneNumber dateOfBirth address location role profileImage createdAt');
     if (!patient || patient.role !== 'client') return res.status(403).json({ error: 'Réservé au compte patient.' });
 
     const [appointments, records, notifications, conversations, reviews, waitlistEntries, auditHistory] = await Promise.all([
