@@ -6,7 +6,7 @@ const AppointmentDetails = require('../models/AppointmentDetails');
 const Teleconsultation = require('../models/teleconsultation');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
-const { notifyAppointmentParticipants, createNotification } = require('../services/notifications');
+const { createNotification } = require('../services/notifications');
 const WaitlistEntry = require('../models/WaitlistEntry');
 const Notification = require('../models/Notification');
 const { offerNextWaitlistPatient } = require('../services/waitlist');
@@ -112,13 +112,28 @@ router.post('/', authenticateToken, async (req, res) => {
       await Notification.updateMany({ waitlistEntryId: activeWaitlistOffer._id }, { $set: { action: null } });
     }
 
-    await notifyAppointmentParticipants(appointment, {
-      title: 'Nouveau rendez-vous',
-      message: doctor.requiresConfirmation
-        ? 'Une demande de rendez-vous attend votre confirmation.'
-        : 'Un nouveau rendez-vous a été réservé.',
-      dedupeKey: `appointment:${appointment._id}:created`,
-    });
+    await Promise.all([
+      createNotification({
+        userId: doctor._id,
+        appointmentId: appointment._id,
+        type: 'appointment',
+        title: 'Nouveau rendez-vous',
+        message: doctor.requiresConfirmation
+          ? `Une demande de rendez-vous pour le ${dateKey} à ${time} attend votre confirmation.`
+          : `Un rendez-vous a été réservé pour le ${dateKey} à ${time}.`,
+        dedupeKey: `appointment:${appointment._id}:created:doctor`,
+      }),
+      createNotification({
+        userId: patient._id,
+        appointmentId: appointment._id,
+        type: 'appointment',
+        title: doctor.requiresConfirmation ? 'Demande envoyée' : 'Rendez-vous confirmé',
+        message: doctor.requiresConfirmation
+          ? `Votre demande pour le ${dateKey} à ${time} attend la confirmation du médecin.`
+          : `Votre rendez-vous du ${dateKey} à ${time} est confirmé.`,
+        dedupeKey: `appointment:${appointment._id}:created:patient`,
+      }),
+    ]);
 
     const populatedAppointment = await Appointment.findById(appointment._id)
       .populate('doctorId', 'firstName lastName speciality')
@@ -228,7 +243,7 @@ router.put('/:appointmentId/accept', authenticateToken, async (req, res) => {
       appointmentId: appointment._id,
       type: 'appointment',
       title: 'Rendez-vous confirmé',
-      message: 'Le médecin a confirmé votre rendez-vous.',
+      message: `Votre rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time} est confirmé par le médecin.`,
       dedupeKey: `appointment:${appointment._id}:accepted:patient`,
     });
 
