@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const multer = require('multer');
 const Appointment = require('../models/Appointment');
 const AppointmentDetails = require('../models/AppointmentDetails');
 const PatientRecord = require('../models/PatientRecord');
@@ -10,6 +11,40 @@ const Notification = require('../models/Notification');
 const DoctorAbsence = require('../models/DoctorAbsence');
 
 const router = express.Router();
+const medicalFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
+    if (!allowedTypes.includes(file.mimetype)) return callback(new Error('Format non pris en charge. Utilisez un PDF, JPG ou PNG.'));
+    callback(null, true);
+  },
+});
+
+function medicalFileUploadMiddleware(req, res, next) {
+  medicalFileUpload.single('file')(req, res, (error) => {
+    if (error) return res.status(400).json({ error: error.message || 'Fichier invalide.' });
+    next();
+  });
+}
+
+function hasValidMedicalFileSignature(file) {
+  if (file.mimetype === 'application/pdf') return file.buffer.subarray(0, 5).toString() === '%PDF-';
+  if (file.mimetype === 'image/png') return file.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (file.mimetype === 'image/jpeg') return file.buffer[0] === 0xff && file.buffer[1] === 0xd8 && file.buffer[2] === 0xff;
+  return false;
+}
+
+async function getAuthorizedPatientRecord(req) {
+  if (!mongoose.Types.ObjectId.isValid(req.params.patientId)) return { status: 400, error: 'ID patient invalide.' };
+  const doctor = await getDoctorForRequest(req);
+  if (!doctor) return { status: 403, error: 'Réservé au médecin traitant.' };
+  const patient = await User.findOne({ _id: req.params.patientId, role: 'client' }).select('_id');
+  if (!patient) return { status: 404, error: 'Patient introuvable.' };
+  const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id });
+  if (!hasConsulted) return { status: 403, error: 'Aucune consultation avec ce patient.' };
+  return { doctor, patient };
+}
 
 function prescriptionText(value) {
   if (typeof value === 'string') return value.trim() === '[object Object]' ? '' : value.trim();
@@ -48,6 +83,70 @@ async function getDoctorForRequest(req) {
   const doctor = await User.findById(req.user.id).select('_id role availability');
   return doctor?.role === 'doctor' ? doctor : null;
 }
+
+router.post('/:patientId/attachments', authenticateToken, medicalFileUploadMiddleware, async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Sélectionnez un fichier.' });
+    if (!hasValidMedicalFileSignature(req.file)) return res.status(400).json({ error: 'Le contenu du fichier ne correspond pas à son format déclaré.' });
+    const access = await getAuthorizedPatientRecord(req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    let record = await PatientRecord.findOne({ doctorId: access.doctor._id, patientId: access.patient._id });
+    if (!record) record = new PatientRecord({ doctorId: access.doctor._id, patientId: access.patient._id });
+    const currentBytes = (record.attachments || []).reduce((sum, attachment) => sum + attachment.size, 0);
+    if (record.attachments.length >= 20 || currentBytes + req.file.size > 12 * 1024 * 1024) {
+      return res.status(413).json({ error: 'La fiche a atteint sa limite de pièces jointes.' });
+    }
+    const safeName = String(req.file.originalname || 'document')
+      .replace(/[\\/\0-\x1f\x7f]/g, '_').slice(-180) || 'document';
+    record.attachments.push({ fileName: safeName, mimeType: req.file.mimetype, size: req.file.size, data: req.file.buffer });
+    await record.save();
+    const attachment = record.attachments[record.attachments.length - 1];
+    res.status(201).json({ attachment: { id: String(attachment._id), fileName: attachment.fileName, mimeType: attachment.mimeType, size: attachment.size, uploadedAt: attachment.uploadedAt } });
+  } catch (error) {
+    console.error('Unable to upload patient attachment:', error.message);
+    res.status(500).json({ error: 'Impossible d’ajouter la pièce jointe.' });
+  }
+});
+
+router.get('/:patientId/attachments/:attachmentId', authenticateToken, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.attachmentId)) return res.status(400).json({ error: 'Pièce jointe invalide.' });
+    const access = await getAuthorizedPatientRecord(req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const record = await PatientRecord.findOne({ doctorId: access.doctor._id, patientId: access.patient._id }).select('+attachments.data');
+    const attachment = record?.attachments.id(req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+    const safeName = attachment.fileName.replace(/[\r\n"\\]/g, '_');
+    res.set({
+      'Content-Type': attachment.mimeType,
+      'Content-Length': String(attachment.size),
+      'Content-Disposition': `inline; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-store',
+    });
+    res.send(attachment.data);
+  } catch (error) {
+    console.error('Unable to download patient attachment:', error.message);
+    res.status(500).json({ error: 'Impossible de télécharger la pièce jointe.' });
+  }
+});
+
+router.delete('/:patientId/attachments/:attachmentId', authenticateToken, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.attachmentId)) return res.status(400).json({ error: 'Pièce jointe invalide.' });
+    const access = await getAuthorizedPatientRecord(req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const record = await PatientRecord.findOne({ doctorId: access.doctor._id, patientId: access.patient._id });
+    const attachment = record?.attachments.id(req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+    attachment.deleteOne();
+    await record.save();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Unable to delete patient attachment:', error.message);
+    res.status(500).json({ error: 'Impossible de supprimer la pièce jointe.' });
+  }
+});
 
 router.get('/:patientId/record', authenticateToken, async (req, res) => {
   try {
