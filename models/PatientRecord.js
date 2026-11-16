@@ -8,6 +8,8 @@ const consultationSchema = new mongoose.Schema({
   treatment: { type: String, default: '', maxlength: 4000 },
   prescriptions: { type: [String], default: [] },
   notes: { type: String, default: '', maxlength: 4000 },
+  followUpAt: { type: Date, default: null },
+  followUpAppointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', default: null },
 }, { timestamps: true });
 
 const patientRecordSchema = new mongoose.Schema({

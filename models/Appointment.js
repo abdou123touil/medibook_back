@@ -43,6 +43,8 @@ const appointmentSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  isFollowUp: { type: Boolean, default: false },
+  followUpOfAppointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', default: null },
   teleconsultation: {
     jitsiUrl: {
       type: String,

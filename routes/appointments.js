@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const Appointment = require('../models/Appointment');
 const AppointmentDetails = require('../models/AppointmentDetails');
+const PatientRecord = require('../models/PatientRecord');
 const Teleconsultation = require('../models/teleconsultation');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
@@ -330,6 +331,17 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
     }
     await appointment.save();
 
+    if (appointment.isFollowUp) {
+      await PatientRecord.updateOne(
+        { doctorId: appointment.doctorId, patientId: appointment.patientId, 'consultations.followUpAppointmentId': appointment._id },
+        { $set: { 'consultations.$.followUpAt': null, 'consultations.$.followUpAppointmentId': null } }
+      );
+      await Notification.updateMany(
+        { dedupeKey: { $regex: `^follow-up:${appointment.followUpOfAppointmentId}:` }, readAt: null },
+        { $set: { readAt: new Date() } }
+      );
+    }
+
     await offerNextWaitlistPatient(
       appointment.doctorId,
       appointment.date.toISOString().slice(0, 10),
@@ -402,6 +414,13 @@ router.put('/:appointmentId/complete', authenticateToken, async (req, res) => {
       appointment.teleconsultation.status = 'completed';
     }
     await appointment.save();
+
+    if (appointment.isFollowUp) {
+      await PatientRecord.updateOne(
+        { doctorId: appointment.doctorId, patientId: appointment.patientId, 'consultations.followUpAppointmentId': appointment._id },
+        { $set: { 'consultations.$.followUpAt': null, 'consultations.$.followUpAppointmentId': null } }
+      );
+    }
 
     await createNotification({
       userId: appointment.patientId,

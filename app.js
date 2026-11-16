@@ -150,6 +150,7 @@ cron.schedule('* * * * *', async () => {
         });
       }
     }
+
     await retryFailedAppointmentReminderEmails();
   } catch (error) {
     console.error('Unable to create appointment reminders:', error.message);

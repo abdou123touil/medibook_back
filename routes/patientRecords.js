@@ -6,6 +6,8 @@ const PatientRecord = require('../models/PatientRecord');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
+const Notification = require('../models/Notification');
+const DoctorAbsence = require('../models/DoctorAbsence');
 
 const router = express.Router();
 
@@ -32,7 +34,7 @@ function includeLegacyConsultations(record, appointments, details) {
 }
 
 async function getDoctorForRequest(req) {
-  const doctor = await User.findById(req.user.id).select('_id role');
+  const doctor = await User.findById(req.user.id).select('_id role availability');
   return doctor?.role === 'doctor' ? doctor : null;
 }
 
@@ -165,16 +167,110 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
           ? consultation.prescriptions.map((item) => String(item).trim()).filter(Boolean).slice(0, 30)
           : [],
         notes: String(consultation.notes || '').slice(0, 4000),
+        followUpAt: consultation.followUpAt ? new Date(consultation.followUpAt) : null,
       };
+      const followUpDate = typeof consultation.followUpDate === 'string' ? consultation.followUpDate : '';
+      const followUpTime = typeof consultation.followUpTime === 'string' ? consultation.followUpTime : '';
+      if (consultation.followUpAt && Number.isNaN(values.followUpAt.getTime())) {
+        return res.status(400).json({ error: 'La date de suivi est invalide.' });
+      }
+      if (consultation.followUpAt && (!/^\d{4}-\d{2}-\d{2}$/.test(followUpDate) || !/^\d{2}:\d{2}$/.test(followUpTime))) {
+        return res.status(400).json({ error: 'Choisissez un créneau de suivi valide.' });
+      }
       const existingIndex = record.consultations.findIndex(
         (entry) => entry.appointmentId.toString() === appointment._id.toString()
       );
+      const previousFollowUp = existingIndex >= 0 ? record.consultations[existingIndex].followUpAt : null;
+      const previousFollowUpAppointmentId = existingIndex >= 0 ? record.consultations[existingIndex].followUpAppointmentId : null;
+      const previousFollowUpAppointment = previousFollowUpAppointmentId
+        ? await Appointment.findOne({ _id: previousFollowUpAppointmentId, doctorId: doctor._id, patientId: patient._id })
+        : null;
+      let followUpSlotChanged = false;
+      if (values.followUpAt) {
+        const existingDateKey = previousFollowUpAppointment?.date?.toISOString().slice(0, 10);
+        const sameExistingSlot = previousFollowUpAppointment
+          && previousFollowUpAppointment.status !== 'cancelled'
+          && existingDateKey === followUpDate
+          && previousFollowUpAppointment.time === followUpTime;
+        followUpSlotChanged = !sameExistingSlot;
+        if (followUpSlotChanged) {
+          const availabilityForDate = doctor.availability instanceof Map
+            ? doctor.availability.get(followUpDate)
+            : doctor.availability?.[followUpDate];
+          if (!Array.isArray(availabilityForDate) || !availabilityForDate.includes(followUpTime)) {
+            return res.status(409).json({ error: 'Ce créneau de suivi n’est plus disponible. Choisissez-en un autre.' });
+          }
+          const blockedPeriod = await DoctorAbsence.findOne({
+            doctorId: doctor._id,
+            status: 'active',
+            startDate: { $lte: followUpDate },
+            endDate: { $gte: followUpDate },
+          });
+          if (blockedPeriod) return res.status(409).json({ error: 'Cette période est bloquée. Choisissez un autre créneau.' });
+          const dayStart = new Date(`${followUpDate}T00:00:00.000Z`);
+          const dayEnd = new Date(`${followUpDate}T23:59:59.999Z`);
+          const occupied = await Appointment.findOne({
+            doctorId: doctor._id,
+            date: { $gte: dayStart, $lte: dayEnd },
+            time: followUpTime,
+            status: { $in: ['pending', 'accepted'] },
+          });
+          if (occupied) return res.status(409).json({ error: 'Ce créneau vient d’être réservé. Choisissez-en un autre.' });
+        }
+      }
       if (existingIndex >= 0) Object.assign(record.consultations[existingIndex], values);
       else {
         record.consultations.push(values);
         consultationWasAdded = true;
       }
       savedAppointmentId = appointment._id;
+      const previousFollowUpTime = previousFollowUp ? new Date(previousFollowUp).getTime() : null;
+      const nextFollowUpTime = values.followUpAt ? values.followUpAt.getTime() : null;
+      if (previousFollowUpTime !== nextFollowUpTime) {
+        await Notification.updateMany(
+          { appointmentId: appointment._id, dedupeKey: { $regex: `^follow-up:${appointment._id}:` }, readAt: null },
+          { $set: { readAt: new Date() } }
+        );
+      }
+      if (!values.followUpAt && previousFollowUpAppointment && ['pending', 'accepted'].includes(previousFollowUpAppointment.status)) {
+        previousFollowUpAppointment.status = 'cancelled';
+        previousFollowUpAppointment.cancelledBy = 'doctor';
+        previousFollowUpAppointment.cancellationReason = 'Le suivi recommandé a été retiré par le médecin.';
+        await previousFollowUpAppointment.save();
+        record.consultations[existingIndex].followUpAppointmentId = null;
+        await createNotification({
+          userId: patient._id,
+          appointmentId: previousFollowUpAppointment._id,
+          type: 'appointment',
+          title: 'Rendez-vous de suivi annulé',
+          message: 'Le médecin a annulé le rendez-vous de suivi précédemment programmé.',
+          dedupeKey: `follow-up:${savedAppointmentId}:cancelled:${previousFollowUpAppointment._id}`,
+        });
+      } else if (values.followUpAt && followUpSlotChanged) {
+        const date = new Date(`${followUpDate}T00:00:00.000Z`);
+        let followUpAppointment = previousFollowUpAppointment && ['pending', 'accepted'].includes(previousFollowUpAppointment.status)
+          ? previousFollowUpAppointment
+          : null;
+        if (followUpAppointment) {
+          followUpAppointment.date = date;
+          followUpAppointment.time = followUpTime;
+          followUpAppointment.symptoms = 'Suivi médical';
+          await followUpAppointment.save();
+        } else {
+          followUpAppointment = await Appointment.create({
+            doctorId: doctor._id,
+            patientId: patient._id,
+            date,
+            time: followUpTime,
+            symptoms: 'Suivi médical',
+            status: 'accepted',
+            isFollowUp: true,
+            followUpOfAppointmentId: appointment._id,
+          });
+        }
+        record.consultations[existingIndex >= 0 ? existingIndex : record.consultations.length - 1].followUpAppointmentId = followUpAppointment._id;
+      }
+      await record.save();
     }
 
     await record.save();
@@ -186,6 +282,19 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         title: 'Compte rendu disponible',
         message: 'Le médecin a ajouté un compte rendu à votre dossier médical.',
         dedupeKey: `appointment:${savedAppointmentId}:record-added:patient`,
+      });
+    }
+    const savedConsultation = consultation && record.consultations.find(
+      (entry) => entry.appointmentId.toString() === String(savedAppointmentId)
+    );
+    if (savedConsultation?.followUpAt && savedConsultation.followUpAt > new Date()) {
+      await createNotification({
+        userId: patient._id,
+        appointmentId: savedAppointmentId,
+        type: 'reminder',
+        title: 'Suivi médical recommandé',
+        message: 'Un rendez-vous de suivi a été programmé par votre médecin.',
+        dedupeKey: `follow-up:${savedAppointmentId}:scheduled:${savedConsultation.followUpAt.toISOString()}`,
       });
     }
     res.json({ record });

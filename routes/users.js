@@ -7,6 +7,8 @@ const Teleconsultation = require('../models/teleconsultation');
 const DoctorAbsence = require('../models/DoctorAbsence');
 const WaitlistEntry = require('../models/WaitlistEntry');
 const User = require('../models/User');
+const PatientRecord = require('../models/PatientRecord');
+const Notification = require('../models/Notification');
 const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
 const { buildAvailableSlots } = require('../services/availableSlots');
@@ -363,7 +365,7 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
       doctorId: doctor._id,
       date: { $gte: start, $lte: end },
       status: { $in: ['pending', 'accepted', 'completed'] },
-    }).select('_id patientId date time status isTeleconsultation');
+    }).select('_id patientId date time status isTeleconsultation isFollowUp followUpOfAppointmentId');
 
     const { remaining: availableDates, removed: removedAvailability } = removeAvailabilityInRange(
       doctor.availability,
@@ -399,6 +401,16 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
       );
       if (!updatedAppointment) continue;
       cancelledCount += 1;
+      if (appointment.isFollowUp) {
+        await PatientRecord.updateOne(
+          { doctorId: appointment.doctorId, patientId: appointment.patientId, 'consultations.followUpAppointmentId': appointment._id },
+          { $set: { 'consultations.$.followUpAt': null, 'consultations.$.followUpAppointmentId': null } }
+        );
+        await Notification.updateMany(
+          { appointmentId: appointment._id, dedupeKey: { $regex: `^follow-up:${appointment.followUpOfAppointmentId}:` }, readAt: null },
+          { $set: { readAt: new Date() } }
+        );
+      }
       await Teleconsultation.updateOne({ appointmentId: appointment._id }, { $set: { status: 'cancelled' } });
       await createNotification({
         userId: appointment.patientId,
