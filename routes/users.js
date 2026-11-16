@@ -201,7 +201,7 @@ router.post('/logout', (_req, res) => {
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName availability requiresConfirmation'
+      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName professionalRegistrationNumber documentHeader documentFooter availability requiresConfirmation'
     );
     if (!user) {
       return res.status(404).json({ error: 'Utilisateur non trouvé.' });
@@ -218,7 +218,7 @@ router.put('/profile', authenticateToken, upload.fields([
   { name: 'profileImage', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber, address, email, speciality, hospitalName, lat, lng, requiresConfirmation } = req.body;
+    const { firstName, lastName, phoneNumber, address, email, speciality, hospitalName, professionalRegistrationNumber, documentHeader, documentFooter, lat, lng, requiresConfirmation } = req.body;
     const user = await User.findById(req.user.id);
 
     if (!user) {
@@ -246,6 +246,9 @@ router.put('/profile', authenticateToken, upload.fields([
     if (user.role === 'doctor') {
       user.speciality = speciality || user.speciality;
       user.hospitalName = hospitalName || user.hospitalName;
+      if (professionalRegistrationNumber !== undefined) user.professionalRegistrationNumber = String(professionalRegistrationNumber).trim().slice(0, 80);
+      if (documentHeader !== undefined) user.documentHeader = String(documentHeader).trim().slice(0, 160);
+      if (documentFooter !== undefined) user.documentFooter = String(documentFooter).trim().slice(0, 500);
       user.requiresConfirmation = requiresConfirmation !== undefined ? requiresConfirmation === 'true' : user.requiresConfirmation;
     }
     if (req.files?.['profileImage']) {
@@ -267,6 +270,9 @@ router.put('/profile', authenticateToken, upload.fields([
         role: user.role,
         speciality: user.speciality,
         hospitalName: user.hospitalName,
+        professionalRegistrationNumber: user.professionalRegistrationNumber,
+        documentHeader: user.documentHeader,
+        documentFooter: user.documentFooter,
         profileImage: user.profileImage,
         requiresConfirmation: user.requiresConfirmation
       }

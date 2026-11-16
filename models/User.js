@@ -22,6 +22,9 @@ const userSchema = new mongoose.Schema({
   address: { type: String, trim: true },
   phoneNumber: { type: String, trim: true },
   hospitalName: { type: String, trim: true },
+  professionalRegistrationNumber: { type: String, trim: true, maxlength: 80 },
+  documentHeader: { type: String, trim: true, maxlength: 160 },
+  documentFooter: { type: String, trim: true, maxlength: 500 },
   location: {
     lat: { type: Number, min: -90, max: 90 },
     lng: { type: Number, min: -180, max: 180 },
