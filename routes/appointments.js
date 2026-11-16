@@ -289,10 +289,16 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
       appointment._id
     );
 
-    await notifyAppointmentParticipants(appointment, {
+    const cancelledByPatient = appointment.patientId.toString() === userId;
+    await createNotification({
+      userId: cancelledByPatient ? appointment.doctorId : appointment.patientId,
+      appointmentId: appointment._id,
+      type: 'appointment',
       title: 'Rendez-vous annulé',
-      message: 'Un rendez-vous a été annulé.',
-      dedupeKey: `appointment:${appointment._id}:cancelled`,
+      message: cancelledByPatient
+        ? `Le patient a annulé le rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}.`
+        : `Le médecin a annulé votre rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}.`,
+      dedupeKey: `appointment:${appointment._id}:cancelled:${cancelledByPatient ? 'doctor' : 'patient'}`,
     });
 
     // Mettre à jour la téléconsultation associée
