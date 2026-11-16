@@ -4,7 +4,11 @@ const multer = require('multer');
 const Appointment = require('../models/Appointment');
 const AppointmentDetails = require('../models/AppointmentDetails');
 const PatientRecord = require('../models/PatientRecord');
+const PatientRecordAudit = require('../models/PatientRecordAudit');
 const User = require('../models/User');
+const Chat = require('../models/Chat');
+const Review = require('../models/Review');
+const WaitlistEntry = require('../models/WaitlistEntry');
 const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
 const Notification = require('../models/Notification');
@@ -41,7 +45,7 @@ async function getAuthorizedPatientRecord(req) {
   if (!doctor) return { status: 403, error: 'Réservé au médecin traitant.' };
   const patient = await User.findOne({ _id: req.params.patientId, role: 'client' }).select('_id');
   if (!patient) return { status: 404, error: 'Patient introuvable.' };
-  const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id });
+  const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } });
   if (!hasConsulted) return { status: 403, error: 'Aucune consultation avec ce patient.' };
   return { doctor, patient };
 }
@@ -101,6 +105,7 @@ router.post('/:patientId/attachments', authenticateToken, medicalFileUploadMiddl
     record.attachments.push({ fileName: safeName, mimeType: req.file.mimetype, size: req.file.size, data: req.file.buffer });
     await record.save();
     const attachment = record.attachments[record.attachments.length - 1];
+    await PatientRecordAudit.create({ patientId: access.patient._id, doctorId: access.doctor._id, actorId: access.doctor._id, action: 'attachment_uploaded', attachmentName: safeName });
     res.status(201).json({ attachment: { id: String(attachment._id), fileName: attachment.fileName, mimeType: attachment.mimeType, size: attachment.size, uploadedAt: attachment.uploadedAt } });
   } catch (error) {
     console.error('Unable to upload patient attachment:', error.message);
@@ -139,8 +144,10 @@ router.delete('/:patientId/attachments/:attachmentId', authenticateToken, async 
     const record = await PatientRecord.findOne({ doctorId: access.doctor._id, patientId: access.patient._id });
     const attachment = record?.attachments.id(req.params.attachmentId);
     if (!attachment) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+    const attachmentName = attachment.fileName;
     attachment.deleteOne();
     await record.save();
+    await PatientRecordAudit.create({ patientId: access.patient._id, doctorId: access.doctor._id, actorId: access.doctor._id, action: 'attachment_deleted', attachmentName });
     res.json({ success: true });
   } catch (error) {
     console.error('Unable to delete patient attachment:', error.message);
@@ -161,19 +168,21 @@ router.get('/:patientId/record', authenticateToken, async (req, res) => {
     const patient = await User.findOne({ _id: patientId, role: 'client' }).select('_id firstName lastName');
     if (!patient) return res.status(404).json({ error: 'Patient introuvable.' });
 
-    const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id });
+    const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } });
     if (!hasConsulted) return res.status(403).json({ error: 'Aucune consultation avec ce patient.' });
 
-    const [record, appointments] = await Promise.all([
+    const [record, appointments, auditHistory] = await Promise.all([
       PatientRecord.findOne({ doctorId: doctor._id, patientId: patient._id }).lean(),
-      Appointment.find({ doctorId: doctor._id, patientId: patient._id })
+      Appointment.find({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } })
         .select('_id date time status symptoms')
         .sort({ date: -1 })
         .lean(),
+      PatientRecordAudit.find({ doctorId: doctor._id, patientId: patient._id })
+        .populate('actorId', 'firstName lastName role').sort({ createdAt: -1 }).limit(50).lean(),
     ]);
     const details = await AppointmentDetails.find({ appointmentId: { $in: appointments.map((item) => item._id) } }).lean();
 
-    res.json({ patient, record: includeLegacyConsultations(record, appointments, details), appointments });
+    res.json({ patient, record: includeLegacyConsultations(record, appointments, details), appointments, auditHistory });
   } catch (error) {
     console.error('Unable to load patient record:', error.message);
     res.status(500).json({ error: 'Impossible de charger la fiche patient.' });
@@ -227,6 +236,70 @@ router.get('/me/records', authenticateToken, async (req, res) => {
   }
 });
 
+router.get('/me/export', authenticateToken, async (req, res) => {
+  try {
+    const patient = await User.findById(req.user.id)
+      .select('firstName lastName email phoneNumber address location role profileImage createdAt');
+    if (!patient || patient.role !== 'client') return res.status(403).json({ error: 'Réservé au compte patient.' });
+
+    const [appointments, records, notifications, conversations, reviews, waitlistEntries, auditHistory] = await Promise.all([
+      Appointment.find({ patientId: patient._id }).populate('doctorId', 'firstName lastName speciality').sort({ date: -1, time: -1 }).lean(),
+      PatientRecord.find({ patientId: patient._id }).populate('doctorId', 'firstName lastName speciality').sort({ updatedAt: -1 }).lean(),
+      Notification.find({ userId: patient._id }).select('type title message action waitlistEntryId createdAt readAt appointmentId').sort({ createdAt: -1 }).lean(),
+      Chat.find({ $or: [{ senderId: patient._id }, { receiverId: patient._id }] }).select('senderId receiverId appointmentId content readAt createdAt updatedAt').sort({ createdAt: 1 }).lean(),
+      Review.find({ patientId: patient._id }).select('doctorId patientName rating comment date createdAt').sort({ date: -1 }).lean(),
+      WaitlistEntry.find({ patientId: patient._id }).select('doctorId date symptoms status offeredTime offeredUntil appointmentId createdAt updatedAt').sort({ createdAt: -1 }).lean(),
+      PatientRecordAudit.find({ patientId: patient._id }).populate('doctorId', 'firstName lastName speciality').populate('actorId', 'firstName lastName role').sort({ createdAt: -1 }).lean(),
+    ]);
+    const legacyDetails = appointments.length ? await AppointmentDetails.find({ appointmentId: { $in: appointments.map((item) => item._id) } }).lean() : [];
+    const exportData = {
+      exportVersion: 1,
+      exportedAt: new Date().toISOString(),
+      notice: 'Medical attachment files remain available for secure individual download; this export contains their metadata.',
+      profile: patient.toObject(),
+      appointments,
+      medicalRecords: records,
+      medicalRecordChangeHistory: auditHistory,
+      legacyConsultationDetails: legacyDetails,
+      notifications,
+      conversations,
+      reviews,
+      waitlistEntries,
+    };
+    const fileName = `medibook-export-${new Date().toISOString().slice(0, 10)}.json`;
+    res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="${fileName}"`, 'Cache-Control': 'private, no-store' });
+    res.send(JSON.stringify(exportData, null, 2));
+  } catch (error) {
+    console.error('Unable to export patient data:', error.message);
+    res.status(500).json({ error: 'Impossible de préparer l’export de vos données.' });
+  }
+});
+
+router.get('/me/attachments/:doctorId/:attachmentId', authenticateToken, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.doctorId) || !mongoose.Types.ObjectId.isValid(req.params.attachmentId)) {
+      return res.status(400).json({ error: 'Pièce jointe invalide.' });
+    }
+    const patient = await User.findById(req.user.id).select('_id role');
+    if (!patient || patient.role !== 'client') return res.status(403).json({ error: 'Réservé au compte patient.' });
+    const record = await PatientRecord.findOne({ patientId: patient._id, doctorId: req.params.doctorId }).select('+attachments.data');
+    const attachment = record?.attachments.id(req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+    const safeName = attachment.fileName.replace(/[\r\n"\\]/g, '_');
+    res.set({
+      'Content-Type': attachment.mimeType,
+      'Content-Length': String(attachment.size),
+      'Content-Disposition': `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-store',
+    });
+    res.send(attachment.data);
+  } catch (error) {
+    console.error('Unable to download patient-owned attachment:', error.message);
+    res.status(500).json({ error: 'Impossible de télécharger la pièce jointe.' });
+  }
+});
+
 router.put('/:patientId/record', authenticateToken, async (req, res) => {
   try {
     const { patientId } = req.params;
@@ -241,11 +314,25 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
     const patient = await User.findOne({ _id: patientId, role: 'client' }).select('_id');
     if (!patient) return res.status(404).json({ error: 'Patient introuvable.' });
 
-    const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id });
+    const hasConsulted = await Appointment.exists({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } });
     if (!hasConsulted) return res.status(403).json({ error: 'Aucune consultation avec ce patient.' });
 
     let record = await PatientRecord.findOne({ doctorId: doctor._id, patientId: patient._id });
     if (!record) record = new PatientRecord({ doctorId: doctor._id, patientId: patient._id });
+    const recordWasNew = record.isNew;
+    const directFields = ['allergies', 'medicalHistory', 'currentMedications'];
+    const previousDirectValues = Object.fromEntries(directFields.map((field) => [field, record[field] || '']));
+    const targetAppointmentId = consultation?.appointmentId ? String(consultation.appointmentId) : '';
+    const previousConsultation = targetAppointmentId
+      ? record.consultations.find((entry) => String(entry.appointmentId) === targetAppointmentId)
+      : null;
+    const previousConsultationValues = previousConsultation ? {
+      diagnosis: previousConsultation.diagnosis || '',
+      treatment: previousConsultation.treatment || '',
+      prescriptions: previousConsultation.prescriptions || [],
+      notes: previousConsultation.notes || '',
+      followUpAt: previousConsultation.followUpAt || null,
+    } : null;
 
     if (allergies !== undefined) record.allergies = String(allergies).slice(0, 4000);
     if (medicalHistory !== undefined) record.medicalHistory = String(medicalHistory).slice(0, 8000);
@@ -398,6 +485,33 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
     }
 
     await record.save();
+    const changedFields = directFields.filter((field) =>
+      String(previousDirectValues[field]) !== String(record[field] || '')
+    );
+    if (consultation && targetAppointmentId) {
+      const currentConsultation = record.consultations.find((entry) => String(entry.appointmentId) === targetAppointmentId);
+      const currentValues = {
+        diagnosis: currentConsultation?.diagnosis || '',
+        treatment: currentConsultation?.treatment || '',
+        prescriptions: currentConsultation?.prescriptions || [],
+        notes: currentConsultation?.notes || '',
+        followUpAt: currentConsultation?.followUpAt || null,
+      };
+      for (const field of Object.keys(currentValues)) {
+        if (JSON.stringify(previousConsultationValues?.[field] ?? (field === 'prescriptions' ? [] : field === 'followUpAt' ? null : '')) !== JSON.stringify(currentValues[field])) {
+          changedFields.push(`consultation.${field}`);
+        }
+      }
+    }
+    if (changedFields.length) {
+      await PatientRecordAudit.create({
+        patientId: patient._id,
+        doctorId: doctor._id,
+        actorId: doctor._id,
+        action: recordWasNew ? 'record_created' : 'record_updated',
+        changedFields,
+      });
+    }
     if (consultationWasAdded) {
       await createNotification({
         userId: patient._id,
