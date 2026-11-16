@@ -19,6 +19,7 @@ async function expirePastPendingAppointments() {
         status: 'cancelled',
         cancellationReason: 'La demande n’a pas été confirmée avant l’heure du rendez-vous.',
         cancelledBy: 'system',
+        cancelledAt: now,
       } },
       { new: true }
     );

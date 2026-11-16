@@ -107,41 +107,62 @@ cron.schedule('* * * * *', async () => {
       date: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000), $lte: new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000) },
     })
       .select('_id doctorId patientId date time')
-      .populate('patientId', 'firstName email')
+      .populate('patientId', 'firstName email reminderPreferences')
       .populate('doctorId', 'firstName lastName');
 
     for (const appointment of appointments) {
       const datePart = new Date(appointment.date).toISOString().slice(0, 10);
       const appointmentDateTime = new Date(`${datePart}T${appointment.time}:00`);
       const minutesUntil = (appointmentDateTime.getTime() - now.getTime()) / 60000;
-      let reminder;
-      let emailReminderKey;
-      if (minutesUntil > 23 * 60 && minutesUntil <= 24 * 60) {
-        reminder = { key: '24h', title: 'Rappel de rendez-vous', message: `Votre rendez-vous est prévu demain à ${appointment.time}.` };
-      } else if (minutesUntil > 59 && minutesUntil <= 60) {
-        reminder = { key: '1h', title: 'Rendez-vous bientôt', message: `Votre rendez-vous commence dans environ une heure (${appointment.time}).` };
+      const patientPreferences = appointment.patientId?.reminderPreferences || {};
+      const patientChannels = {
+        inAppEnabled: patientPreferences.inAppEnabled !== false,
+        emailEnabled: patientPreferences.emailEnabled !== false,
+        before24h: patientPreferences.before24h !== false,
+        before2h: patientPreferences.before2h !== false,
+      };
+      const in24HourWindow = minutesUntil > 23 * 60 && minutesUntil <= 24 * 60;
+      const in2HourWindow = minutesUntil > 110 && minutesUntil <= 120;
+      const in1HourWindow = minutesUntil > 59 && minutesUntil <= 60;
+
+      const patientReminder = in24HourWindow && patientChannels.before24h
+        ? { key: '24h', title: 'Rappel de rendez-vous', message: `Votre rendez-vous est prévu demain à ${appointment.time}.` }
+        : in2HourWindow && patientChannels.before2h
+          ? { key: '2h', title: 'Rendez-vous bientôt', message: `Votre rendez-vous commence dans environ deux heures (${appointment.time}).` }
+          : null;
+      if (patientReminder && patientChannels.inAppEnabled && appointment.patientId?._id) {
+        await createNotification({
+          userId: appointment.patientId._id,
+          appointmentId: appointment._id,
+          type: 'reminder',
+          title: patientReminder.title,
+          message: patientReminder.message,
+          dedupeKey: `appointment:${appointment._id}:reminder:${patientReminder.key}:${appointment.patientId._id}`,
+        });
       }
 
-      if (minutesUntil > 23 * 60 && minutesUntil <= 24 * 60) {
-        emailReminderKey = '24h';
-      } else if (minutesUntil > 110 && minutesUntil <= 120) {
-        emailReminderKey = '2h';
+      const doctorReminder = in24HourWindow
+        ? { key: '24h', title: 'Rappel de rendez-vous', message: `Votre rendez-vous est prévu demain à ${appointment.time}.` }
+        : in1HourWindow
+          ? { key: '1h', title: 'Rendez-vous bientôt', message: `Votre rendez-vous commence dans environ une heure (${appointment.time}).` }
+          : null;
+      if (doctorReminder && appointment.doctorId?._id) {
+        await createNotification({
+          userId: appointment.doctorId._id,
+          appointmentId: appointment._id,
+          type: 'reminder',
+          title: doctorReminder.title,
+          message: doctorReminder.message,
+          dedupeKey: `appointment:${appointment._id}:reminder:${doctorReminder.key}:${appointment.doctorId._id}`,
+        });
       }
 
-      if (reminder) {
-        await Promise.all([appointment.doctorId, appointment.patientId].map((user) =>
-          createNotification({
-            userId: user?._id || user,
-            appointmentId: appointment._id,
-            type: 'reminder',
-            title: reminder.title,
-            message: reminder.message,
-            dedupeKey: `appointment:${appointment._id}:reminder:${reminder.key}:${user?._id || user}`,
-          })
-        ));
-      }
-
-      if (emailReminderKey && appointment.patientId?.email) {
+      const emailReminderKey = in24HourWindow && patientChannels.before24h
+        ? '24h'
+        : in2HourWindow && patientChannels.before2h
+          ? '2h'
+          : null;
+      if (emailReminderKey && patientChannels.emailEnabled && appointment.patientId?.email) {
         await sendAppointmentReminderEmail({
           appointment,
           patient: appointment.patientId,

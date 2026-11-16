@@ -225,6 +225,59 @@ router.get('/doctor/:doctorId', authenticateToken, async (req, res) => {
   }
 });
 
+router.get('/doctor/:doctorId/operational-overview', authenticateToken, async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(doctorId)) return res.status(400).json({ error: 'ID du médecin invalide.' });
+    const doctor = await User.findById(req.user.id).select('_id role');
+    if (!isDoctorOwner(doctor, doctorId)) return res.status(403).json({ error: 'Accès non autorisé.' });
+
+    const now = new Date();
+    const startToday = new Date(now);
+    startToday.setHours(0, 0, 0, 0);
+    const cancellationSince = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const [pendingCount, pendingAppointments, recentCancellationCount, recentCancellations, completedAppointments] = await Promise.all([
+      Appointment.countDocuments({ doctorId, status: 'pending', date: { $gte: startToday } }),
+      Appointment.find({ doctorId, status: 'pending', date: { $gte: startToday } })
+        .populate('patientId', 'firstName lastName')
+        .sort({ date: 1, time: 1 }).limit(10).lean(),
+      Appointment.countDocuments({ doctorId, status: 'cancelled', cancelledAt: { $gte: cancellationSince } }),
+      Appointment.find({ doctorId, status: 'cancelled', cancelledAt: { $gte: cancellationSince } })
+        .populate('patientId', 'firstName lastName')
+        .sort({ cancelledAt: -1 }).limit(8).lean(),
+      Appointment.find({ doctorId, status: 'completed' })
+        .populate('patientId', 'firstName lastName')
+        .sort({ date: -1, time: -1 }).lean(),
+    ]);
+
+    const appointmentIds = completedAppointments.map((item) => item._id);
+    const patientIds = [...new Set(completedAppointments.map((item) => String(item.patientId?._id || item.patientId)).filter(Boolean))];
+    const [legacyDetails, records] = await Promise.all([
+      appointmentIds.length ? AppointmentDetails.find({ appointmentId: { $in: appointmentIds } }).select('appointmentId').lean() : [],
+      patientIds.length ? PatientRecord.find({ doctorId: new mongoose.Types.ObjectId(doctorId), patientId: { $in: patientIds } })
+        .select('patientId consultations.appointmentId consultations.diagnosis consultations.treatment consultations.notes consultations.prescriptions').lean() : [],
+    ]);
+    const completedWithLegacyDetails = new Set(legacyDetails.map((item) => String(item.appointmentId)));
+    const completedWithClinicalDetails = new Set();
+    for (const record of records) {
+      for (const consultation of record.consultations || []) {
+        if (consultation.diagnosis?.trim() || consultation.treatment?.trim() || consultation.notes?.trim() || consultation.prescriptions?.length) {
+          completedWithClinicalDetails.add(String(consultation.appointmentId));
+        }
+      }
+    }
+    const incomplete = completedAppointments.filter((item) =>
+      !completedWithLegacyDetails.has(String(item._id)) && !completedWithClinicalDetails.has(String(item._id))
+    );
+    const incompleteAppointments = incomplete.slice(0, 10);
+
+    res.json({ pendingCount, pendingAppointments, recentCancellationCount, recentCancellations, incompleteCount: incomplete.length, incompleteAppointments, cancellationsSince });
+  } catch (error) {
+    console.error('Unable to load doctor operational overview:', error.message);
+    res.status(500).json({ error: 'Impossible de charger le tableau de bord opérationnel.' });
+  }
+});
+
 // Accepter un rendez-vous
 router.put('/:appointmentId/accept', authenticateToken, async (req, res) => {
   try {
@@ -326,6 +379,7 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
     appointment.status = 'cancelled';
     appointment.cancellationReason = reason;
     appointment.cancelledBy = cancelledByPatient ? 'client' : 'doctor';
+    appointment.cancelledAt = new Date();
     if (appointment.isTeleconsultation && appointment.teleconsultation) {
       appointment.teleconsultation.status = 'cancelled';
     }

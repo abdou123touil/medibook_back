@@ -201,7 +201,7 @@ router.post('/logout', (_req, res) => {
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName professionalRegistrationNumber documentHeader documentFooter availability requiresConfirmation'
+      'firstName lastName email role phoneNumber address location profileImage speciality description hospitalName professionalRegistrationNumber documentHeader documentFooter availability requiresConfirmation reminderPreferences'
     );
     if (!user) {
       return res.status(404).json({ error: 'Utilisateur non trouvé.' });
@@ -280,6 +280,24 @@ router.put('/profile', authenticateToken, upload.fields([
   } catch (error) {
     console.error('Erreur lors de la mise à jour du profil:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.put('/reminder-preferences', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('_id role reminderPreferences');
+    if (!user || user.role !== 'client') return res.status(403).json({ error: 'Ces préférences sont réservées aux comptes patient.' });
+    const fields = ['inAppEnabled', 'emailEnabled', 'before24h', 'before2h'];
+    const preferences = req.body?.reminderPreferences;
+    if (!preferences || fields.some((field) => typeof preferences[field] !== 'boolean')) {
+      return res.status(400).json({ error: 'Préférences de rappel invalides.' });
+    }
+    user.reminderPreferences = Object.fromEntries(fields.map((field) => [field, preferences[field]]));
+    await user.save();
+    res.json({ reminderPreferences: user.reminderPreferences });
+  } catch (error) {
+    console.error('Unable to save reminder preferences:', error.message);
+    res.status(500).json({ error: 'Impossible d’enregistrer les préférences de rappel.' });
   }
 });
 
@@ -400,6 +418,7 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
             status: 'cancelled',
             cancellationReason: reason || `Absence du médecin du ${startDate} au ${endDate}.`,
             cancelledBy: 'doctor',
+            cancelledAt: new Date(),
             ...(appointment.isTeleconsultation ? { 'teleconsultation.status': 'cancelled' } : {}),
           },
         },

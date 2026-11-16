@@ -39,6 +39,7 @@ const appointmentSchema = new mongoose.Schema({
     enum: ['client', 'doctor', 'system', null],
     default: null,
   },
+  cancelledAt: { type: Date, default: null, index: true },
   isTeleconsultation: {
     type: Boolean,
     default: false,

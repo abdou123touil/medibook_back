@@ -1,6 +1,13 @@
 const mongoose = require('mongoose');
 const validator = require('validator');
 
+const reminderPreferencesSchema = new mongoose.Schema({
+  inAppEnabled: { type: Boolean, default: true },
+  emailEnabled: { type: Boolean, default: true },
+  before24h: { type: Boolean, default: true },
+  before2h: { type: Boolean, default: true },
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
   firstName: { type: String, required: true, trim: true },
   lastName: { type: String, required: true, trim: true },
@@ -68,6 +75,7 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  reminderPreferences: { type: reminderPreferencesSchema, default: () => ({}) },
   resetPasswordToken: String,
   resetPasswordExpires: Date,
 });

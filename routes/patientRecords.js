@@ -359,6 +359,7 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         previousFollowUpAppointment.status = 'cancelled';
         previousFollowUpAppointment.cancelledBy = 'doctor';
         previousFollowUpAppointment.cancellationReason = 'Le suivi recommandé a été retiré par le médecin.';
+        previousFollowUpAppointment.cancelledAt = new Date();
         await previousFollowUpAppointment.save();
         record.consultations[existingIndex].followUpAppointmentId = null;
         await createNotification({

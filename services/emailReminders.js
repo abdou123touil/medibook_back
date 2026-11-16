@@ -125,12 +125,15 @@ async function retryFailedAppointmentReminderEmails() {
       select: 'status date time doctorId',
       populate: { path: 'doctorId', select: 'firstName lastName' },
     })
-    .populate('recipientId', 'firstName email');
+    .populate('recipientId', 'firstName email reminderPreferences');
 
   for (const reminder of dueReminders) {
     const appointment = reminder.appointmentId;
     const patient = reminder.recipientId;
-    if (!appointment || appointment.status !== 'accepted' || !patient?.email) {
+    const preferences = patient?.reminderPreferences || {};
+    const emailStillEnabled = preferences.emailEnabled !== false
+      && (reminder.reminderKey === '24h' ? preferences.before24h !== false : preferences.before2h !== false);
+    if (!appointment || appointment.status !== 'accepted' || !patient?.email || !emailStillEnabled) {
       await EmailReminder.updateOne({ _id: reminder._id, status: 'failed' }, { $set: { status: 'cancelled' } });
       continue;
     }
