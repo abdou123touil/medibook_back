@@ -15,6 +15,14 @@ const { isDoctorOwner } = require('../services/accessControl');
 const { jwtSecret } = require('../config/security');
 
 const router = express.Router();
+const SESSION_COOKIE = 'medibook_session';
+const sessionCookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.COOKIE_SAME_SITE || 'lax',
+  maxAge: 24 * 60 * 60 * 1000,
+  path: '/',
+};
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -121,9 +129,8 @@ router.post('/register', registrationUpload, async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, jwtSecret, { expiresIn: '24h' });
-    res.status(201).json({
+    res.cookie(SESSION_COOKIE, token, sessionCookieOptions).status(201).json({
       message: 'Utilisateur enregistré avec succès.',
-      token,
       user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email, role: user.role }
     });
   } catch (error) {
@@ -162,41 +169,30 @@ router.post('/login', async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    // Si l'utilisateur est un médecin, on récupère ses rendez-vous à venir
-    let appointments = [];
-    if (user.role === 'doctor') {
-      appointments = await Appointment.find({
-        doctorId: user._id,
-      }).populate('patientId', 'firstName lastName');
-    }
-
-    // Si l'utilisateur est un patient, on récupère ses rendez-vous
-    if (user.role === 'client') {
-      appointments = await Appointment.find({
-        patientId: user._id,
-      }).populate('doctorId', 'firstName lastName speciality');
-    }
-
-    // Log pour vérifier availability
-    console.log('User availability on login:', Object.fromEntries(user.availability || new Map()));
-
-    res.status(200).json({
+    res.cookie(SESSION_COOKIE, token, sessionCookieOptions).status(200).json({
       message: 'Connexion réussie.',
-      token,
       user: {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
         role: user.role,
-        availability: Object.fromEntries(user.availability || new Map()),
       },
-      appointments,
     });
   } catch (error) {
     console.error('Erreur lors de la connexion:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+router.post('/logout', (_req, res) => {
+  res.clearCookie(SESSION_COOKIE, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.COOKIE_SAME_SITE || 'lax',
+    path: '/',
+  });
+  res.json({ message: 'Déconnexion réussie.' });
 });
 
 // Récupérer le profil de l'utilisateur connecté

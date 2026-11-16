@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const cron = require('node-cron');
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
@@ -26,10 +27,11 @@ const server = http.createServer(app);
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(cors({
-  origin: 'http://localhost:5173',
+  origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   credentials: true, 
 }));
+app.use(cookieParser());
 
 app.use(bodyParser.json());
 app.use(express.json());
@@ -41,14 +43,15 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/doctorBoo
 
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:5173',
+    origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
     methods: ['GET', 'POST'],
     credentials: true, 
   },
 });
 
 io.use((socket, next) => {
-  const token = socket.handshake.auth?.token;
+  const cookie = socket.handshake.headers.cookie || '';
+  const token = cookie.match(/(?:^|;\s*)medibook_session=([^;]+)/)?.[1];
   if (!token) return next(new Error('Authentification requise.'));
   jwt.verify(token, jwtSecret, (error, user) => {
     if (error) return next(new Error('Jeton invalide.'));
