@@ -18,6 +18,7 @@ const Appointment = require('./models/Appointment');
 const { createNotification } = require('./services/notifications');
 const patientRecordRoutes = require('./routes/patientRecords');
 const waitlistRoutes = require('./routes/waitlist');
+const medicationRoutes = require('./routes/medications');
 const { expireWaitlistOffers } = require('./services/waitlist');
 const { expirePastPendingAppointments } = require('./services/appointmentLifecycle');
 const { sendAppointmentReminderEmail, retryFailedAppointmentReminderEmails } = require('./services/emailReminders');
@@ -95,6 +96,7 @@ app.use('/api/reviews', reviewsRouter);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/patients', patientRecordRoutes);
 app.use('/api/waitlist', waitlistRoutes);
+app.use('/api/medications', medicationRoutes);
 
 // Persist in-app reminders for accepted appointments, once per recipient and reminder window.
 cron.schedule('* * * * *', async () => {
