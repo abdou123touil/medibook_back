@@ -9,7 +9,9 @@ const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
 const WaitlistEntry = require('../models/WaitlistEntry');
 const Notification = require('../models/Notification');
+const DoctorAbsence = require('../models/DoctorAbsence');
 const { offerNextWaitlistPatient } = require('../services/waitlist');
+const { getBookingSlotError, getCancellationError, getAppointmentTransitionError } = require('../services/appointmentRules');
 const router = express.Router();
 
 // Créer un rendez-vous
@@ -41,10 +43,12 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     const dateKey = appointmentDate.toISOString().split('T')[0];
-    const availableSlots = doctor.availability.get(dateKey) || [];
-    if (!availableSlots.includes(time)) {
-      return res.status(400).json({ error: 'Ce créneau n\'est pas disponible.' });
-    }
+    const blockedPeriod = await DoctorAbsence.findOne({
+      doctorId,
+      status: 'active',
+      startDate: { $lte: dateKey },
+      endDate: { $gte: dateKey },
+    });
 
     const activeWaitlistOffer = await WaitlistEntry.findOne({
       doctorId,
@@ -53,17 +57,31 @@ router.post('/', authenticateToken, async (req, res) => {
       status: { $in: ['offered', 'booking'] },
       offeredUntil: { $gt: new Date() },
     });
-    if (activeWaitlistOffer && activeWaitlistOffer.patientId.toString() !== patientId) {
-      return res.status(409).json({ error: 'Ce créneau est temporairement réservé à un patient de la liste d’attente.' });
-    }
-
     const existingAppointment = await Appointment.findOne({
       doctorId,
       date: appointmentDate,
       time,
       status: { $in: ['pending', 'accepted'] },
     });
-    if (existingAppointment) {
+    const slotError = getBookingSlotError({
+      availability: doctor.availability,
+      date: dateKey,
+      time,
+      blockedPeriod,
+      activeWaitlistOffer,
+      patientId,
+      existingAppointment,
+    });
+    if (slotError === 'blocked') {
+      return res.status(409).json({ error: 'Cette période est bloquée par le médecin.' });
+    }
+    if (slotError === 'unavailable') {
+      return res.status(400).json({ error: 'Ce créneau n\'est pas disponible.' });
+    }
+    if (slotError === 'waitlist_reserved') {
+      return res.status(409).json({ error: 'Ce créneau est temporairement réservé à un patient de la liste d’attente.' });
+    }
+    if (slotError === 'already_booked') {
       return res.status(400).json({ error: 'Ce créneau est déjà réservé.' });
     }
 
@@ -228,7 +246,7 @@ router.put('/:appointmentId/accept', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Ce rendez-vous ne vous est pas attribué.' });
     }
 
-    if (appointment.status !== 'pending') {
+    if (getAppointmentTransitionError(appointment.status, 'accept')) {
       return res.status(400).json({ error: "Ce rendez-vous ne peut pas être accepté car il n'est pas en attente." });
     }
 
@@ -285,14 +303,21 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Rendez-vous non trouvé.' });
     }
 
-    if (appointment.patientId.toString() !== userId && appointment.doctorId.toString() !== userId) {
+    const cancellationError = getCancellationError({
+      reason,
+      status: appointment.status,
+      isParticipant: appointment.patientId.toString() === userId || appointment.doctorId.toString() === userId,
+    });
+    if (cancellationError === 'invalid_reason') {
+      return res.status(400).json({ error: 'La raison doit contenir entre 5 et 500 caractères.' });
+    }
+    if (cancellationError === 'unauthorized') {
       return res.status(403).json({ error: "Vous n'êtes pas autorisé à annuler ce rendez-vous." });
     }
-
-    if (appointment.status === 'cancelled') {
+    if (cancellationError === 'already_cancelled') {
       return res.status(400).json({ error: 'Ce rendez-vous est déjà annulé.' });
     }
-    if (appointment.status === 'completed') {
+    if (cancellationError === 'already_completed') {
       return res.status(400).json({ error: 'Ce rendez-vous est déjà terminé.' });
     }
 
@@ -370,7 +395,7 @@ router.put('/:appointmentId/complete', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Ce rendez-vous ne vous est pas attribué.' });
     }
 
-    if (appointment.status !== 'accepted') {
+    if (getAppointmentTransitionError(appointment.status, 'complete')) {
       return res.status(400).json({ error: "Ce rendez-vous ne peut pas être complété car il n'est pas accepté." });
     }
 

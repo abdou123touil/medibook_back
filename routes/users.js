@@ -9,6 +9,8 @@ const WaitlistEntry = require('../models/WaitlistEntry');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
 const { createNotification } = require('../services/notifications');
+const { buildAvailableSlots } = require('../services/availableSlots');
+const { removeAvailabilityInRange, restoreAvailability } = require('../services/doctorAbsenceRules');
 
 const router = express.Router();
 const JWT_SECRET = 'abdou123touil';
@@ -310,14 +312,11 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
       status: { $in: ['pending', 'accepted'] },
     }).select('_id patientId date time status isTeleconsultation');
 
-    const availableDates = Object.fromEntries(doctor.availability || new Map());
-    const removedAvailability = {};
-    for (const date of Object.keys(availableDates)) {
-      if (date >= startDate && date <= endDate) {
-        removedAvailability[date] = availableDates[date];
-        delete availableDates[date];
-      }
-    }
+    const { remaining: availableDates, removed: removedAvailability } = removeAvailabilityInRange(
+      doctor.availability,
+      startDate,
+      endDate
+    );
     doctor.availability = availableDates;
     await doctor.save();
 
@@ -411,11 +410,11 @@ router.put('/doctor-absence/:absenceId/cancel', authenticateToken, async (req, r
       `${appointment.date.toISOString().slice(0, 10)}:${appointment.time}`
     ));
 
-    const restoredAvailability = Object.fromEntries(doctor.availability || new Map());
-    for (const [date, times] of Object.entries(absence.removedAvailability || {})) {
-      const conflictFreeTimes = (Array.isArray(times) ? times : []).filter((time) => !bookedSlots.has(`${date}:${time}`));
-      restoredAvailability[date] = [...new Set([...(restoredAvailability[date] || []), ...conflictFreeTimes])].sort();
-    }
+    const restoredAvailability = restoreAvailability(
+      doctor.availability,
+      absence.removedAvailability,
+      bookedSlots
+    );
     doctor.availability = restoredAvailability;
     await doctor.save();
     absence.status = 'cancelled';
@@ -475,28 +474,14 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
       endDate: { $gte: startDate },
     }).select('startDate endDate').lean();
 
-    const availableSlots = {};
-    // Les anciens comptes peuvent encore avoir availability stocké comme objet
-    // alors que le schéma Mongoose actuel le convertit en Map.
-    const availabilityEntries = doctor.availability instanceof Map
-      ? doctor.availability.entries()
-      : Object.entries(doctor.availability || {});
-
-    for (const [date, times] of availabilityEntries) {
-      const isBlocked = blockedPeriods.some((period) => date >= period.startDate && date <= period.endDate);
-      if (date >= startDate && date <= endDate && !isBlocked) {
-        const bookedTimes = appointments
-          .filter((apt) => {
-            const appointmentDate = new Date(apt.date);
-            return !Number.isNaN(appointmentDate.getTime())
-              && appointmentDate.toISOString().slice(0, 10) === date;
-          })
-          .map(apt => apt.time);
-        const offeredTimes = activeOffers.filter(offer => offer.date === date).map(offer => offer.offeredTime);
-        availableSlots[date] = (Array.isArray(times) ? times : [])
-          .filter(time => !bookedTimes.includes(time) && !offeredTimes.includes(time));
-      }
-    }
+    const availableSlots = buildAvailableSlots({
+      availability: doctor.availability,
+      appointments,
+      activeOffers,
+      blockedPeriods,
+      startDate,
+      endDate,
+    });
 
     res.json({
       availableSlots,
