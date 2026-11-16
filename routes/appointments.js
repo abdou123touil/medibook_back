@@ -273,7 +273,12 @@ router.put('/:appointmentId/accept', authenticateToken, async (req, res) => {
 router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
   try {
     const { appointmentId } = req.params;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
     const userId = req.user.id;
+
+    if (reason.length < 5 || reason.length > 500) {
+      return res.status(400).json({ error: 'La raison doit contenir entre 5 et 500 caractères.' });
+    }
 
     const appointment = await Appointment.findById(appointmentId);
     if (!appointment) {
@@ -291,7 +296,12 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Ce rendez-vous est déjà terminé.' });
     }
 
+    const wasPending = appointment.status === 'pending';
+    const cancelledByPatient = appointment.patientId.toString() === userId;
+    const reasonForNotification = reason.length > 280 ? `${reason.slice(0, 277)}...` : reason;
     appointment.status = 'cancelled';
+    appointment.cancellationReason = reason;
+    appointment.cancelledBy = cancelledByPatient ? 'client' : 'doctor';
     if (appointment.isTeleconsultation && appointment.teleconsultation) {
       appointment.teleconsultation.status = 'cancelled';
     }
@@ -304,16 +314,17 @@ router.put('/:appointmentId/cancel', authenticateToken, async (req, res) => {
       appointment._id
     );
 
-    const cancelledByPatient = appointment.patientId.toString() === userId;
     await createNotification({
       userId: cancelledByPatient ? appointment.doctorId : appointment.patientId,
       appointmentId: appointment._id,
       type: 'appointment',
-      title: 'Rendez-vous annulé',
+      title: !cancelledByPatient && wasPending ? 'Demande refusée' : 'Rendez-vous annulé',
       message: cancelledByPatient
-        ? `Le patient a annulé le rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}.`
-        : `Le médecin a annulé votre rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}.`,
-      dedupeKey: `appointment:${appointment._id}:cancelled:${cancelledByPatient ? 'doctor' : 'patient'}`,
+        ? `Le patient a annulé le rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}. Raison : ${reasonForNotification}`
+        : wasPending
+          ? `Le médecin n’a pas accepté votre demande du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}. Raison : ${reasonForNotification}`
+          : `Le médecin a annulé votre rendez-vous du ${appointment.date.toISOString().slice(0, 10)} à ${appointment.time}. Raison : ${reasonForNotification}`,
+      dedupeKey: `appointment:${appointment._id}:${!cancelledByPatient && wasPending ? 'rejected' : 'cancelled'}:${cancelledByPatient ? 'doctor' : 'patient'}`,
     });
 
     // Mettre à jour la téléconsultation associée

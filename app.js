@@ -16,6 +16,7 @@ const { createNotification } = require('./services/notifications');
 const patientRecordRoutes = require('./routes/patientRecords');
 const waitlistRoutes = require('./routes/waitlist');
 const { expireWaitlistOffers } = require('./services/waitlist');
+const { expirePastPendingAppointments } = require('./services/appointmentLifecycle');
 const app = express();
 const server = http.createServer(app);
 
@@ -114,6 +115,14 @@ cron.schedule('* * * * *', async () => {
     await expireWaitlistOffers();
   } catch (error) {
     console.error('Unable to rotate expired waitlist offers:', error.message);
+  }
+});
+
+cron.schedule('* * * * *', async () => {
+  try {
+    await expirePastPendingAppointments();
+  } catch (error) {
+    console.error('Unable to expire past pending appointments:', error.message);
   }
 });
 

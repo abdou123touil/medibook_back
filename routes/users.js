@@ -3,9 +3,11 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const Appointment = require('../models/Appointment');
+const Teleconsultation = require('../models/teleconsultation');
 const WaitlistEntry = require('../models/WaitlistEntry');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
+const { createNotification } = require('../services/notifications');
 
 const router = express.Router();
 const JWT_SECRET = 'abdou123touil';
@@ -257,6 +259,85 @@ router.put('/update-availability', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Erreur lors de la mise à jour des disponibilités:', error);
     res.status(400).json({ error: error.message || 'Erreur lors de la mise à jour des disponibilités.' });
+  }
+});
+
+router.post('/doctor-absence', authenticateToken, async (req, res) => {
+  try {
+    const doctor = await User.findById(req.user.id).select('_id role firstName lastName availability');
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(403).json({ error: 'Cette action est réservée aux médecins.' });
+    }
+
+    const { startDate, endDate } = req.body;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+    const isValidDate = (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    };
+    if (!isValidDate(startDate) || !isValidDate(endDate) || startDate > endDate) {
+      return res.status(400).json({ error: 'Sélectionnez une période valide.' });
+    }
+    const todayKey = new Date().toISOString().slice(0, 10);
+    if (startDate < todayKey || endDate < todayKey) {
+      return res.status(400).json({ error: 'La période doit inclure au moins une date à venir.' });
+    }
+
+    const start = new Date(`${startDate}T00:00:00.000Z`);
+    const end = new Date(`${endDate}T23:59:59.999Z`);
+    const appointments = await Appointment.find({
+      doctorId: doctor._id,
+      date: { $gte: start, $lte: end },
+      status: { $in: ['pending', 'accepted'] },
+    }).select('_id patientId date time status isTeleconsultation');
+
+    const availableDates = Object.fromEntries(doctor.availability || new Map());
+    for (const date of Object.keys(availableDates)) {
+      if (date >= startDate && date <= endDate) delete availableDates[date];
+    }
+    doctor.availability = availableDates;
+    await doctor.save();
+
+    const reasonForPatients = reason ? ` Motif : ${reason}` : '';
+    let cancelledCount = 0;
+    for (const appointment of appointments) {
+      const date = appointment.date.toISOString().slice(0, 10);
+      const updatedAppointment = await Appointment.findOneAndUpdate(
+        { _id: appointment._id, status: { $in: ['pending', 'accepted'] } },
+        {
+          $set: {
+            status: 'cancelled',
+            cancellationReason: reason || `Absence du médecin du ${startDate} au ${endDate}.`,
+            cancelledBy: 'doctor',
+            ...(appointment.isTeleconsultation ? { 'teleconsultation.status': 'cancelled' } : {}),
+          },
+        },
+        { new: true }
+      );
+      if (!updatedAppointment) continue;
+      cancelledCount += 1;
+      await Teleconsultation.updateOne({ appointmentId: appointment._id }, { $set: { status: 'cancelled' } });
+      await createNotification({
+        userId: appointment.patientId,
+        appointmentId: appointment._id,
+        doctorId: doctor._id,
+        type: 'appointment',
+        title: 'Rendez-vous annulé : absence du médecin',
+        message: `Dr. ${doctor.firstName} ${doctor.lastName} ne pourra pas assurer votre rendez-vous du ${date} à ${appointment.time}. Choisissez un nouveau créneau ou gardez l’annulation.${reasonForPatients}`.slice(0, 500),
+        dedupeKey: `appointment:${appointment._id}:doctor-absence`,
+        action: 'reschedule_appointment',
+      });
+    }
+
+    res.json({
+      message: 'Période d’absence enregistrée.',
+      availability: availableDates,
+      cancelledAppointments: cancelledCount,
+    });
+  } catch (error) {
+    console.error('Impossible d’enregistrer l’absence du médecin:', error);
+    res.status(500).json({ error: 'Impossible d’enregistrer cette période d’absence.' });
   }
 });
 

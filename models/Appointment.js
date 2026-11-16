@@ -28,6 +28,17 @@ const appointmentSchema = new mongoose.Schema({
     enum: ['pending', 'accepted', 'completed', 'cancelled'],
     default: 'pending',
   },
+  cancellationReason: {
+    type: String,
+    trim: true,
+    maxlength: 500,
+    default: null,
+  },
+  cancelledBy: {
+    type: String,
+    enum: ['client', 'doctor', 'system', null],
+    default: null,
+  },
   isTeleconsultation: {
     type: Boolean,
     default: false,

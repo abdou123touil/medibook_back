@@ -1,9 +1,9 @@
 const Notification = require('../models/Notification');
 
-async function createNotification({ userId, appointmentId, type = 'appointment', title, message, dedupeKey, action, waitlistEntryId, slotDate, slotTime }) {
+async function createNotification({ userId, appointmentId, type = 'appointment', title, message, dedupeKey, action, waitlistEntryId, slotDate, slotTime, doctorId }) {
   if (!userId) return;
   try {
-    await Notification.create({ userId, appointmentId, type, title, message, dedupeKey, action, waitlistEntryId, slotDate, slotTime });
+    await Notification.create({ userId, appointmentId, type, title, message, dedupeKey, action, waitlistEntryId, slotDate, slotTime, doctorId });
   } catch (error) {
     // A duplicate key means this event or reminder has already been stored.
     if (error.code !== 11000) {
