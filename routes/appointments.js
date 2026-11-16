@@ -45,6 +45,16 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     const dateKey = appointmentDate.toISOString().split('T')[0];
+    const patientAppointmentConflict = await Appointment.findOne({
+      patientId,
+      date: appointmentDate,
+      time,
+      status: { $in: ['pending', 'accepted'] },
+    }).select('_id');
+    if (patientAppointmentConflict) {
+      return res.status(409).json({ error: 'Vous avez déjà un rendez-vous prévu à cette date et à cette heure.' });
+    }
+
     const blockedPeriod = await DoctorAbsence.findOne({
       doctorId,
       status: 'active',
