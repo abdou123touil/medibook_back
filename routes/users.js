@@ -16,16 +16,55 @@ const router = express.Router();
 const JWT_SECRET = 'abdou123touil';
 
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
-
-// Inscription
-router.post('/register', upload.fields([
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024, files: 3 },
+  fileFilter: (_req, file, callback) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return callback(new Error('Les pièces jointes doivent être des images.'));
+    }
+    callback(null, true);
+  },
+});
+const registrationUpload = (req, res, next) => upload.fields([
   { name: 'profileImage', maxCount: 1 },
   { name: 'cinFront', maxCount: 1 },
-  { name: 'cinBack', maxCount: 1 }
-]), async (req, res) => {
+  { name: 'cinBack', maxCount: 1 },
+])(req, res, (error) => {
+  if (error) return res.status(400).json({ error: error.message || 'Fichier image invalide.' });
+  next();
+});
+
+// Inscription
+router.post('/register', registrationUpload, async (req, res) => {
   try {
-    let { firstName, lastName, cinNumber, address, phoneNumber, email, password, role, speciality, hospitalName, availability } = req.body;
+    let { firstName, lastName, cinNumber, address, phoneNumber, email, password, role, speciality, hospitalName, availability, lat, lng } = req.body;
+
+    firstName = typeof firstName === 'string' ? firstName.trim() : '';
+    lastName = typeof lastName === 'string' ? lastName.trim() : '';
+    email = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    cinNumber = typeof cinNumber === 'string' ? cinNumber.trim() : '';
+    address = typeof address === 'string' ? address.trim() : '';
+    if (firstName.length < 2 || lastName.length < 2 || cinNumber.length < 4 || address.length < 5) {
+      return res.status(400).json({ error: 'Renseignez un prénom, un nom, un CIN et une adresse valides.' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Adresse e-mail invalide.' });
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères.' });
+    }
+    if (!['client', 'doctor'].includes(role)) {
+      return res.status(400).json({ error: 'Type de compte invalide.' });
+    }
+    const latitude = Number(lat);
+    const longitude = Number(lng);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      return res.status(400).json({ error: 'Sélectionnez un emplacement valide sur la carte.' });
+    }
+    if (role === 'doctor' && (typeof speciality !== 'string' || speciality.trim().length < 3 || typeof hospitalName !== 'string' || hospitalName.trim().length < 3)) {
+      return res.status(400).json({ error: 'La spécialité et le cabinet sont obligatoires pour un médecin.' });
+    }
 
     // Convert `availability` from string to JSON (for doctors)
     if (availability) {
@@ -38,8 +77,12 @@ router.post('/register', upload.fields([
           if (!Array.isArray(times)) {
             return res.status(400).json({ error: 'Les valeurs de disponibilité doivent être des tableaux d\'heures.' });
           }
+          const parsedDate = new Date(`${date}T00:00:00.000Z`);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) {
+            return res.status(400).json({ error: 'Format de date invalide dans les disponibilités.' });
+          }
           for (const time of times) {
-            if (!/^\d{2}:\d{2}$/.test(time)) {
+            if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) {
               return res.status(400).json({ error: 'Format d\'heure invalide. Utilisez HH:mm.' });
             }
           }
@@ -64,8 +107,9 @@ router.post('/register', upload.fields([
       cinNumber,
       address,
       phoneNumber,
-      speciality: role === 'doctor' ? speciality : null,
-      hospitalName: role === 'doctor' ? hospitalName : null,
+      location: { lat: latitude, lng: longitude },
+      speciality: role === 'doctor' ? speciality.trim() : undefined,
+      hospitalName: role === 'doctor' ? hospitalName.trim() : undefined,
       availability: role === 'doctor' ? availability : {},
       requiresConfirmation: role === 'doctor' ? false : null,
       profileImage: req.files['profileImage'] ? req.files['profileImage'][0].buffer.toString('base64') : null,
@@ -75,13 +119,19 @@ router.post('/register', upload.fields([
 
     await user.save();
 
+    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
     res.status(201).json({
       message: 'Utilisateur enregistré avec succès.',
-      user: { id: user._id, firstName, lastName, email, role }
+      token,
+      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email, role: user.role }
     });
   } catch (error) {
     console.error('Erreur lors de l\'inscription:', error);
-    res.status(500).json({ error: error.message });
+    if (error.code === 11000) return res.status(409).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
+    if (error.name === 'ValidationError' || error instanceof multer.MulterError) {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Impossible de créer le compte pour le moment.' });
   }
 });
 
@@ -498,7 +548,10 @@ router.get('/doctors/:doctorId/available-slots', async (req, res) => {
 // Récupérer tous les médecins
 router.get('/doctors', async (req, res) => {
   try {
-    const doctors = await User.find({ role: 'doctor' }, '-password');
+    const doctors = await User.find(
+      { role: 'doctor' },
+      'firstName lastName speciality description hospitalName location availability requiresConfirmation'
+    );
     res.json(doctors);
   } catch (error) {
     console.error('Erreur lors de la récupération des médecins:', error);

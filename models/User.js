@@ -18,6 +18,17 @@ const userSchema = new mongoose.Schema({
     enum: ['client', 'doctor'],
     default: 'client',
   },
+  cinNumber: { type: String, trim: true },
+  address: { type: String, trim: true },
+  phoneNumber: { type: String, trim: true },
+  hospitalName: { type: String, trim: true },
+  location: {
+    lat: { type: Number, min: -90, max: 90 },
+    lng: { type: Number, min: -180, max: 180 },
+  },
+  profileImage: { type: String, default: null },
+  cinFrontImage: { type: String, default: null },
+  cinBackImage: { type: String, default: null },
   speciality: { type: String, trim: true },
   description: { type: String, trim: true },
   availability: {
