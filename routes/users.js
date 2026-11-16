@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const Appointment = require('../models/Appointment');
 const Teleconsultation = require('../models/teleconsultation');
+const DoctorAbsence = require('../models/DoctorAbsence');
 const WaitlistEntry = require('../models/WaitlistEntry');
 const User = require('../models/User');
 const authenticateToken = require('../middleware/authenticateToken');
@@ -245,6 +246,14 @@ router.put('/update-availability', authenticateToken, async (req, res) => {
       }
     }
 
+    const activeAbsences = await DoctorAbsence.find({ doctorId: userId, status: 'active' }).select('startDate endDate');
+    const attemptedBlockedDate = Object.entries(cleanedAvailability).find(([date, times]) =>
+      times.length > 0 && activeAbsences.some((absence) => date >= absence.startDate && date <= absence.endDate)
+    );
+    if (attemptedBlockedDate) {
+      return res.status(409).json({ error: `La date ${attemptedBlockedDate[0]} est encore bloquée. Annulez d’abord le blocage.` });
+    }
+
     const user = await User.findByIdAndUpdate(
       userId,
       { availability: cleanedAvailability },
@@ -286,6 +295,15 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
 
     const start = new Date(`${startDate}T00:00:00.000Z`);
     const end = new Date(`${endDate}T23:59:59.999Z`);
+    const overlappingAbsence = await DoctorAbsence.findOne({
+      doctorId: doctor._id,
+      status: 'active',
+      startDate: { $lte: endDate },
+      endDate: { $gte: startDate },
+    });
+    if (overlappingAbsence) {
+      return res.status(409).json({ error: 'Cette période chevauche une absence déjà enregistrée.' });
+    }
     const appointments = await Appointment.find({
       doctorId: doctor._id,
       date: { $gte: start, $lte: end },
@@ -293,11 +311,23 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
     }).select('_id patientId date time status isTeleconsultation');
 
     const availableDates = Object.fromEntries(doctor.availability || new Map());
+    const removedAvailability = {};
     for (const date of Object.keys(availableDates)) {
-      if (date >= startDate && date <= endDate) delete availableDates[date];
+      if (date >= startDate && date <= endDate) {
+        removedAvailability[date] = availableDates[date];
+        delete availableDates[date];
+      }
     }
     doctor.availability = availableDates;
     await doctor.save();
+
+    const absence = await DoctorAbsence.create({
+      doctorId: doctor._id,
+      startDate,
+      endDate,
+      reason,
+      removedAvailability,
+    });
 
     const reasonForPatients = reason ? ` Motif : ${reason}` : '';
     let cancelledCount = 0;
@@ -332,12 +362,70 @@ router.post('/doctor-absence', authenticateToken, async (req, res) => {
 
     res.json({
       message: 'Période d’absence enregistrée.',
+      absence,
       availability: availableDates,
       cancelledAppointments: cancelledCount,
     });
   } catch (error) {
     console.error('Impossible d’enregistrer l’absence du médecin:', error);
     res.status(500).json({ error: 'Impossible d’enregistrer cette période d’absence.' });
+  }
+});
+
+router.get('/doctor-absences', authenticateToken, async (req, res) => {
+  try {
+    const doctor = await User.findById(req.user.id).select('_id role');
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(403).json({ error: 'Cette action est réservée aux médecins.' });
+    }
+    const absences = await DoctorAbsence.find({ doctorId: doctor._id, status: 'active' })
+      .sort({ startDate: 1 })
+      .lean();
+    res.json({ absences });
+  } catch (error) {
+    res.status(500).json({ error: 'Impossible de charger les périodes bloquées.' });
+  }
+});
+
+router.put('/doctor-absence/:absenceId/cancel', authenticateToken, async (req, res) => {
+  try {
+    const doctor = await User.findById(req.user.id).select('_id role availability');
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(403).json({ error: 'Cette action est réservée aux médecins.' });
+    }
+    const absence = await DoctorAbsence.findOne({
+      _id: req.params.absenceId,
+      doctorId: doctor._id,
+      status: 'active',
+    });
+    if (!absence) return res.status(404).json({ error: 'Période bloquée introuvable ou déjà annulée.' });
+
+    const start = new Date(`${absence.startDate}T00:00:00.000Z`);
+    const end = new Date(`${absence.endDate}T23:59:59.999Z`);
+    const activeAppointments = await Appointment.find({
+      doctorId: doctor._id,
+      date: { $gte: start, $lte: end },
+      status: { $in: ['pending', 'accepted'] },
+    }).select('date time');
+    const bookedSlots = new Set(activeAppointments.map((appointment) =>
+      `${appointment.date.toISOString().slice(0, 10)}:${appointment.time}`
+    ));
+
+    const restoredAvailability = Object.fromEntries(doctor.availability || new Map());
+    for (const [date, times] of Object.entries(absence.removedAvailability || {})) {
+      const conflictFreeTimes = (Array.isArray(times) ? times : []).filter((time) => !bookedSlots.has(`${date}:${time}`));
+      restoredAvailability[date] = [...new Set([...(restoredAvailability[date] || []), ...conflictFreeTimes])].sort();
+    }
+    doctor.availability = restoredAvailability;
+    await doctor.save();
+    absence.status = 'cancelled';
+    absence.cancelledAt = new Date();
+    await absence.save();
+
+    res.json({ message: 'Blocage annulé et créneaux restaurés.', availability: restoredAvailability });
+  } catch (error) {
+    console.error('Impossible d’annuler le blocage:', error);
+    res.status(500).json({ error: 'Impossible d’annuler cette période bloquée.' });
   }
 });
 
