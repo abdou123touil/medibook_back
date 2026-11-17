@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const consultationSchema = new mongoose.Schema({
   appointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', required: true },
   consultationDate: { type: Date, required: true },
+  price: { type: Number, min: 0, default: 70 },
   symptoms: { type: String, default: '', maxlength: 2000 },
   diagnosis: { type: String, default: '', maxlength: 2000 },
   treatment: { type: String, default: '', maxlength: 4000 },

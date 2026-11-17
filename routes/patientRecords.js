@@ -72,6 +72,7 @@ function includeLegacyConsultations(record, appointments, details) {
     consultations.push({
       appointmentId,
       consultationDate: appointment.date,
+      price: appointment.isFollowUp ? 0 : (Number.isFinite(Number(detail.tarif)) && Number(detail.tarif) >= 0 ? Number(detail.tarif) : 70),
       symptoms: appointment.symptoms || '',
       diagnosis: '',
       treatment: '',
@@ -174,7 +175,7 @@ router.get('/:patientId/record', authenticateToken, async (req, res) => {
     const [record, appointments, auditHistory] = await Promise.all([
       PatientRecord.findOne({ doctorId: doctor._id, patientId: patient._id }).lean(),
       Appointment.find({ doctorId: doctor._id, patientId: patient._id, status: { $in: ['accepted', 'completed'] } })
-        .select('_id date time status symptoms')
+        .select('_id date time status symptoms isFollowUp')
         .sort({ date: -1 })
         .lean(),
       PatientRecordAudit.find({ doctorId: doctor._id, patientId: patient._id })
@@ -200,7 +201,7 @@ router.get('/me/records', authenticateToken, async (req, res) => {
       .sort({ updatedAt: -1 })
       .lean();
     const appointments = await Appointment.find({ patientId: patient._id, status: 'completed' })
-      .select('_id doctorId date time symptoms')
+      .select('_id doctorId date time symptoms isFollowUp')
       .populate('doctorId', 'firstName lastName speciality')
       .lean();
     const details = await AppointmentDetails.find({ appointmentId: { $in: appointments.map((item) => item._id) } }).lean();
@@ -327,6 +328,7 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
       ? record.consultations.find((entry) => String(entry.appointmentId) === targetAppointmentId)
       : null;
     const previousConsultationValues = previousConsultation ? {
+      price: previousConsultation.price ?? 70,
       diagnosis: previousConsultation.diagnosis || '',
       treatment: previousConsultation.treatment || '',
       prescriptions: previousConsultation.prescriptions || [],
@@ -354,9 +356,26 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'La fiche de consultation est disponible pour les rendez-vous acceptés ou terminés.' });
       }
 
+      let storedPrice = Number(previousConsultation?.price);
+      if (!appointment.isFollowUp && (!Number.isFinite(storedPrice) || storedPrice < 0)) {
+        const legacyDetails = await AppointmentDetails.findOne({ appointmentId: appointment._id }).select('tarif').lean();
+        storedPrice = Number(legacyDetails?.tarif);
+      }
+      const hasStoredPrice = Number.isFinite(storedPrice) && storedPrice >= 0;
+      let consultationPrice = appointment.isFollowUp ? 0 : (hasStoredPrice ? storedPrice : 70);
+      if (!appointment.isFollowUp && consultation.price !== undefined) {
+        const requestedPrice = Number(consultation.price);
+        const keepingHistoricalPrice = hasStoredPrice && storedPrice < 70 && requestedPrice === storedPrice;
+        if (!Number.isFinite(requestedPrice) || (requestedPrice < 70 && !keepingHistoricalPrice) || requestedPrice > 1000000) {
+          return res.status(400).json({ error: 'Le tarif minimum d’une consultation est de 70 DT.' });
+        }
+        consultationPrice = Math.round(requestedPrice * 100) / 100;
+      }
+
       const values = {
         appointmentId: appointment._id,
         consultationDate: appointment.date,
+        price: consultationPrice,
         symptoms: appointment.symptoms || '',
         diagnosis: String(consultation.diagnosis || '').slice(0, 2000),
         treatment: String(consultation.treatment || '').slice(0, 4000),
@@ -491,6 +510,7 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
     if (consultation && targetAppointmentId) {
       const currentConsultation = record.consultations.find((entry) => String(entry.appointmentId) === targetAppointmentId);
       const currentValues = {
+        price: currentConsultation?.price ?? 70,
         diagnosis: currentConsultation?.diagnosis || '',
         treatment: currentConsultation?.treatment || '',
         prescriptions: currentConsultation?.prescriptions || [],

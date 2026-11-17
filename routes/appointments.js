@@ -222,7 +222,7 @@ router.get('/doctor/:doctorId', authenticateToken, async (req, res) => {
     }
 
     const appointments = await Appointment.find({ doctorId })
-      .populate('patientId', 'firstName lastName')
+      .populate('patientId', 'firstName lastName dateOfBirth phoneNumber')
       .sort({ date: 1 });
 
     res.status(200).json({
