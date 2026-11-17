@@ -869,9 +869,47 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       },
     ]);
 
+    const paymentAppointments = statusFilter && !['all', 'completed'].includes(statusFilter) ? [] : await Appointment.find({
+      doctorId: new mongoose.Types.ObjectId(doctorId),
+      status: 'completed',
+      date: { $gte: start, $lte: end },
+    }).select('_id patientId date').lean();
+    const paymentAppointmentIds = new Set(paymentAppointments.map((item) => String(item._id)));
+    const paymentAppointmentDates = new Map(paymentAppointments.map((item) => [String(item._id), item.date]));
+    const paymentPatientIds = [...new Set(paymentAppointments.map((item) => String(item.patientId)))];
+    const paymentRecords = paymentPatientIds.length
+      ? await PatientRecord.find({ doctorId: new mongoose.Types.ObjectId(doctorId), patientId: { $in: paymentPatientIds } })
+        .select('consultations.appointmentId consultations.price consultations.amountPaid consultations.paymentStatus').lean()
+      : [];
+    const paymentSummary = { amountCollected: 0, amountOutstanding: 0, paidConsultations: 0, partialConsultations: 0, unpaidConsultations: 0 };
+    const collectedByPeriod = {};
+    for (const record of paymentRecords) {
+      for (const consultation of record.consultations || []) {
+        const consultationId = String(consultation.appointmentId);
+        if (!paymentAppointmentIds.has(consultationId)) continue;
+        if (!['unpaid', 'partial', 'paid'].includes(consultation.paymentStatus)) continue;
+        const price = Math.max(0, Number(consultation.price) || 0);
+        const amountPaid = Math.min(price, Math.max(0, Number(consultation.amountPaid) || 0));
+        paymentSummary.amountCollected += amountPaid;
+        paymentSummary.amountOutstanding += Math.max(0, price - amountPaid);
+        const consultationDate = new Date(paymentAppointmentDates.get(consultationId));
+        const periodKey = timeRange === 'quarter' || timeRange === 'year'
+          ? consultationDate.toISOString().slice(0, 7)
+          : consultationDate.toISOString().slice(0, 10);
+        collectedByPeriod[periodKey] = (collectedByPeriod[periodKey] || 0) + amountPaid;
+        if (consultation.paymentStatus === 'paid') paymentSummary.paidConsultations += 1;
+        else if (consultation.paymentStatus === 'partial') paymentSummary.partialConsultations += 1;
+        else paymentSummary.unpaidConsultations += 1;
+      }
+    }
+    const statsWithCollectedRevenue = stats.map((item) => ({
+      ...item,
+      revenue: Math.round((collectedByPeriod[item.date] || 0) * 100) / 100,
+    }));
+
     res.status(200).json({
       message: 'Statistiques récupérées avec succès.',
-      stats,
+      stats: statsWithCollectedRevenue,
       incompleteDetailsCount: incompleteAppointments.length,
       incompleteAppointments,
       noShowRate: parseFloat(noShowRate.toFixed(2)),
@@ -880,6 +918,11 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       statusDistribution,
       totalAppointments,
       totalExpenses: totalExpenses[0]?.total || 0,
+      paymentSummary: {
+        ...paymentSummary,
+        amountCollected: Math.round(paymentSummary.amountCollected * 100) / 100,
+        amountOutstanding: Math.round(paymentSummary.amountOutstanding * 100) / 100,
+      },
     });
   } catch (error) {
     console.error('Erreur lors de la récupération des statistiques:', error);

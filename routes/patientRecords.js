@@ -329,6 +329,9 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
       : null;
     const previousConsultationValues = previousConsultation ? {
       price: previousConsultation.price ?? 70,
+      amountPaid: previousConsultation.amountPaid ?? 0,
+      paymentStatus: previousConsultation.paymentStatus || 'unpaid',
+      paymentMethod: previousConsultation.paymentMethod || null,
       diagnosis: previousConsultation.diagnosis || '',
       treatment: previousConsultation.treatment || '',
       prescriptions: previousConsultation.prescriptions || [],
@@ -372,10 +375,36 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         consultationPrice = Math.round(requestedPrice * 100) / 100;
       }
 
+      const validPaymentMethods = ['cash', 'card', 'transfer', 'other'];
+      const oldAmountPaid = Number(previousConsultation?.amountPaid) || 0;
+      const requestedAmountPaid = appointment.isFollowUp
+        ? 0
+        : consultation.amountPaid === undefined ? oldAmountPaid : Number(consultation.amountPaid);
+      if (!Number.isFinite(requestedAmountPaid) || requestedAmountPaid < 0 || requestedAmountPaid > consultationPrice) {
+        return res.status(400).json({ error: 'Le montant réglé doit être compris entre 0 et le tarif de la consultation.' });
+      }
+      const requestedPaymentMethod = appointment.isFollowUp
+        ? null
+        : consultation.paymentMethod === undefined ? (previousConsultation?.paymentMethod || null) : consultation.paymentMethod || null;
+      if (requestedAmountPaid > 0 && !validPaymentMethods.includes(requestedPaymentMethod)) {
+        return res.status(400).json({ error: 'Choisissez un moyen de paiement pour le montant réglé.' });
+      }
+      const paymentStatus = appointment.isFollowUp || consultationPrice === 0
+        ? 'not_applicable'
+        : requestedAmountPaid >= consultationPrice ? 'paid' : requestedAmountPaid > 0 ? 'partial' : 'unpaid';
+      const paymentChanged = requestedAmountPaid !== oldAmountPaid || requestedPaymentMethod !== (previousConsultation?.paymentMethod || null);
+      const paymentUpdatedAt = requestedAmountPaid > 0
+        ? paymentChanged ? new Date() : previousConsultation?.paymentUpdatedAt || new Date()
+        : null;
+
       const values = {
         appointmentId: appointment._id,
         consultationDate: appointment.date,
         price: consultationPrice,
+        amountPaid: requestedAmountPaid,
+        paymentStatus,
+        paymentMethod: requestedPaymentMethod,
+        paymentUpdatedAt,
         symptoms: appointment.symptoms || '',
         diagnosis: String(consultation.diagnosis || '').slice(0, 2000),
         treatment: String(consultation.treatment || '').slice(0, 4000),
@@ -511,6 +540,9 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
       const currentConsultation = record.consultations.find((entry) => String(entry.appointmentId) === targetAppointmentId);
       const currentValues = {
         price: currentConsultation?.price ?? 70,
+        amountPaid: currentConsultation?.amountPaid ?? 0,
+        paymentStatus: currentConsultation?.paymentStatus || 'unpaid',
+        paymentMethod: currentConsultation?.paymentMethod || null,
         diagnosis: currentConsultation?.diagnosis || '',
         treatment: currentConsultation?.treatment || '',
         prescriptions: currentConsultation?.prescriptions || [],
@@ -518,7 +550,7 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         followUpAt: currentConsultation?.followUpAt || null,
       };
       for (const field of Object.keys(currentValues)) {
-        if (JSON.stringify(previousConsultationValues?.[field] ?? (field === 'prescriptions' ? [] : field === 'followUpAt' ? null : '')) !== JSON.stringify(currentValues[field])) {
+        if (JSON.stringify(previousConsultationValues?.[field] ?? (field === 'prescriptions' ? [] : field === 'followUpAt' || field === 'paymentMethod' ? null : field === 'amountPaid' ? 0 : field === 'paymentStatus' ? 'unpaid' : '')) !== JSON.stringify(currentValues[field])) {
           changedFields.push(`consultation.${field}`);
         }
       }
