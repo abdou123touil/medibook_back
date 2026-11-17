@@ -281,7 +281,7 @@ router.get('/doctor/:doctorId/operational-overview', authenticateToken, async (r
     );
     const incompleteAppointments = incomplete.slice(0, 10);
 
-    res.json({ pendingCount, pendingAppointments, recentCancellationCount, recentCancellations, incompleteCount: incomplete.length, incompleteAppointments, cancellationsSince });
+    res.json({ pendingCount, pendingAppointments, recentCancellationCount, recentCancellations, incompleteCount: incomplete.length, incompleteAppointments });
   } catch (error) {
     console.error('Unable to load doctor operational overview:', error.message);
     res.status(500).json({ error: 'Impossible de charger le tableau de bord opérationnel.' });
