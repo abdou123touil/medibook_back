@@ -393,8 +393,34 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         ? 'not_applicable'
         : requestedAmountPaid >= consultationPrice ? 'paid' : requestedAmountPaid > 0 ? 'partial' : 'unpaid';
       const paymentChanged = requestedAmountPaid !== oldAmountPaid || requestedPaymentMethod !== (previousConsultation?.paymentMethod || null);
+      const paymentChangedAt = paymentChanged ? new Date() : previousConsultation?.paymentUpdatedAt || null;
+      const paymentTransactions = [...(previousConsultation?.paymentTransactions || [])];
+      // Migrate historical totals into a single dated entry so existing payments remain reportable.
+      if (paymentTransactions.length === 0 && oldAmountPaid > 0) {
+        paymentTransactions.push({
+          type: 'payment',
+          amount: oldAmountPaid,
+          method: previousConsultation?.paymentMethod || null,
+          paidAt: previousConsultation?.paymentUpdatedAt || appointment.date,
+        });
+      }
+      if (requestedAmountPaid > oldAmountPaid) {
+        paymentTransactions.push({
+          type: 'payment',
+          amount: requestedAmountPaid - oldAmountPaid,
+          method: requestedPaymentMethod,
+          paidAt: paymentChangedAt || new Date(),
+        });
+      } else if (requestedAmountPaid < oldAmountPaid) {
+        paymentTransactions.push({
+          type: 'refund',
+          amount: oldAmountPaid - requestedAmountPaid,
+          method: previousConsultation?.paymentMethod || requestedPaymentMethod,
+          paidAt: paymentChangedAt || new Date(),
+        });
+      }
       const paymentUpdatedAt = requestedAmountPaid > 0
-        ? paymentChanged ? new Date() : previousConsultation?.paymentUpdatedAt || new Date()
+        ? paymentChangedAt || new Date()
         : null;
 
       const values = {
@@ -405,6 +431,7 @@ router.put('/:patientId/record', authenticateToken, async (req, res) => {
         paymentStatus,
         paymentMethod: requestedPaymentMethod,
         paymentUpdatedAt,
+        paymentTransactions,
         symptoms: appointment.symptoms || '',
         diagnosis: String(consultation.diagnosis || '').slice(0, 2000),
         treatment: String(consultation.treatment || '').slice(0, 4000),

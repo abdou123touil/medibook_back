@@ -869,17 +869,19 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
       },
     ]);
 
-    const paymentAppointments = statusFilter && !['all', 'completed'].includes(statusFilter) ? [] : await Appointment.find({
+    const paymentStatuses = !statusFilter || statusFilter === 'all'
+      ? ['accepted', 'completed']
+      : ['accepted', 'completed'].includes(statusFilter) ? [statusFilter] : [];
+    const paymentAppointments = paymentStatuses.length ? await Appointment.find({
       doctorId: new mongoose.Types.ObjectId(doctorId),
-      status: 'completed',
-      date: { $gte: start, $lte: end },
-    }).select('_id patientId date').lean();
+      status: { $in: paymentStatuses },
+    }).select('_id patientId date').lean() : [];
     const paymentAppointmentIds = new Set(paymentAppointments.map((item) => String(item._id)));
-    const paymentAppointmentDates = new Map(paymentAppointments.map((item) => [String(item._id), item.date]));
+    const paymentAppointmentById = new Map(paymentAppointments.map((item) => [String(item._id), item]));
     const paymentPatientIds = [...new Set(paymentAppointments.map((item) => String(item.patientId)))];
     const paymentRecords = paymentPatientIds.length
       ? await PatientRecord.find({ doctorId: new mongoose.Types.ObjectId(doctorId), patientId: { $in: paymentPatientIds } })
-        .select('consultations.appointmentId consultations.price consultations.amountPaid consultations.paymentStatus').lean()
+        .select('consultations.appointmentId consultations.price consultations.amountPaid consultations.paymentStatus consultations.paymentMethod consultations.paymentUpdatedAt consultations.paymentTransactions').lean()
       : [];
     const paymentSummary = { amountCollected: 0, amountOutstanding: 0, paidConsultations: 0, partialConsultations: 0, unpaidConsultations: 0 };
     const collectedByPeriod = {};
@@ -888,24 +890,44 @@ router.get('/doctor/:doctorId/stats', authenticateToken, async (req, res) => {
         const consultationId = String(consultation.appointmentId);
         if (!paymentAppointmentIds.has(consultationId)) continue;
         if (!['unpaid', 'partial', 'paid'].includes(consultation.paymentStatus)) continue;
+        const appointment = paymentAppointmentById.get(consultationId);
+        const appointmentDate = new Date(appointment.date);
+        const appointmentInRange = appointmentDate >= start && appointmentDate <= end;
         const price = Math.max(0, Number(consultation.price) || 0);
         const amountPaid = Math.min(price, Math.max(0, Number(consultation.amountPaid) || 0));
-        paymentSummary.amountCollected += amountPaid;
-        paymentSummary.amountOutstanding += Math.max(0, price - amountPaid);
-        const consultationDate = new Date(paymentAppointmentDates.get(consultationId));
-        const periodKey = timeRange === 'quarter' || timeRange === 'year'
-          ? consultationDate.toISOString().slice(0, 7)
-          : consultationDate.toISOString().slice(0, 10);
-        collectedByPeriod[periodKey] = (collectedByPeriod[periodKey] || 0) + amountPaid;
-        if (consultation.paymentStatus === 'paid') paymentSummary.paidConsultations += 1;
-        else if (consultation.paymentStatus === 'partial') paymentSummary.partialConsultations += 1;
-        else paymentSummary.unpaidConsultations += 1;
+        if (appointmentInRange) {
+          paymentSummary.amountOutstanding += Math.max(0, price - amountPaid);
+          if (consultation.paymentStatus === 'paid') paymentSummary.paidConsultations += 1;
+          else if (consultation.paymentStatus === 'partial') paymentSummary.partialConsultations += 1;
+          else paymentSummary.unpaidConsultations += 1;
+        }
+
+        // Cash received belongs to the payment date, which can differ from a future appointment date.
+        // Old records without a ledger use paymentUpdatedAt (and ultimately appointment date) as a fallback.
+        const transactions = Array.isArray(consultation.paymentTransactions) ? consultation.paymentTransactions : [];
+        const entries = transactions.length
+          ? transactions
+          : amountPaid > 0 ? [{ type: 'payment', amount: amountPaid, paidAt: consultation.paymentUpdatedAt || appointment.date }] : [];
+        for (const transaction of entries) {
+          const paidAt = new Date(transaction.paidAt);
+          if (Number.isNaN(paidAt.getTime()) || paidAt < start || paidAt > end) continue;
+          const amount = Math.max(0, Number(transaction.amount) || 0);
+          const signedAmount = transaction.type === 'refund' ? -amount : amount;
+          paymentSummary.amountCollected += signedAmount;
+          const periodKey = timeRange === 'quarter' || timeRange === 'year'
+            ? paidAt.toISOString().slice(0, 7)
+            : paidAt.toISOString().slice(0, 10);
+          collectedByPeriod[periodKey] = (collectedByPeriod[periodKey] || 0) + signedAmount;
+        }
       }
     }
-    const statsWithCollectedRevenue = stats.map((item) => ({
-      ...item,
-      revenue: Math.round((collectedByPeriod[item.date] || 0) * 100) / 100,
-    }));
+    const statsByPeriod = new Map(stats.map((item) => [item.date, { ...item, revenue: 0 }]));
+    for (const [period, revenue] of Object.entries(collectedByPeriod)) {
+      const item = statsByPeriod.get(period) || { date: period, patients: 0, revenue: 0 };
+      item.revenue = Math.round(revenue * 100) / 100;
+      statsByPeriod.set(period, item);
+    }
+    const statsWithCollectedRevenue = [...statsByPeriod.values()].sort((a, b) => a.date.localeCompare(b.date));
 
     res.status(200).json({
       message: 'Statistiques récupérées avec succès.',

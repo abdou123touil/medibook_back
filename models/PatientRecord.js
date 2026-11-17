@@ -1,5 +1,12 @@
 const mongoose = require('mongoose');
 
+const paymentTransactionSchema = new mongoose.Schema({
+  type: { type: String, enum: ['payment', 'refund'], required: true },
+  amount: { type: Number, min: 0, required: true },
+  method: { type: String, enum: ['cash', 'card', 'transfer', 'other', null], default: null },
+  paidAt: { type: Date, required: true },
+}, { _id: false });
+
 const consultationSchema = new mongoose.Schema({
   appointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', required: true },
   consultationDate: { type: Date, required: true },
@@ -8,6 +15,7 @@ const consultationSchema = new mongoose.Schema({
   paymentStatus: { type: String, enum: ['unpaid', 'partial', 'paid', 'not_applicable'], default: 'unpaid' },
   paymentMethod: { type: String, enum: ['cash', 'card', 'transfer', 'other', null], default: null },
   paymentUpdatedAt: { type: Date, default: null },
+  paymentTransactions: { type: [paymentTransactionSchema], default: [] },
   symptoms: { type: String, default: '', maxlength: 2000 },
   diagnosis: { type: String, default: '', maxlength: 2000 },
   treatment: { type: String, default: '', maxlength: 4000 },
