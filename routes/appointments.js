@@ -1026,7 +1026,7 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
 
     console.log("Filtre de requête MongoDB:", matchFilter);
 
-    const stats = await Appointment.aggregate([
+    const appointmentStats = await Appointment.aggregate([
       {
         $match: matchFilter,
       },
@@ -1066,40 +1066,59 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       },
     ]);
 
-    console.log("Stats agrégées:", stats);
+    const paidAppointmentStatuses = !statusFilter || statusFilter === 'all'
+      ? ['accepted', 'completed']
+      : ['accepted', 'completed'].includes(statusFilter) ? [statusFilter] : [];
+    const trackedAppointments = paidAppointmentStatuses.length
+      ? await Appointment.find({
+        patientId: new mongoose.Types.ObjectId(patientId),
+        status: { $in: paidAppointmentStatuses },
+        date: { $gte: start, $lte: end },
+      }).select('_id date status').lean()
+      : [];
+    const patientRecords = await PatientRecord.find({ patientId: new mongoose.Types.ObjectId(patientId) })
+      .select('consultations.appointmentId consultations.amountPaid')
+      .lean();
+    const amountPaidByAppointment = new Map();
+    for (const record of patientRecords) {
+      for (const consultation of record.consultations || []) {
+        const appointmentId = String(consultation.appointmentId);
+        amountPaidByAppointment.set(
+          appointmentId,
+          Math.max(0, Number(consultation.amountPaid) || 0)
+        );
+      }
+    }
+
+    // Keep appointment counts grouped by consultation date, but report only amounts actually paid.
+    const paidExpensesByPeriod = new Map();
+    for (const appointment of trackedAppointments) {
+      if (!['accepted', 'completed'].includes(appointment.status)) continue;
+      const amountPaid = amountPaidByAppointment.get(String(appointment._id)) || 0;
+      if (!amountPaid) continue;
+      const appointmentDate = new Date(appointment.date);
+      const period = timeRange === 'quarter' || timeRange === 'year'
+        ? appointmentDate.toISOString().slice(0, 7)
+        : appointmentDate.toISOString().slice(0, 10);
+      paidExpensesByPeriod.set(period, (paidExpensesByPeriod.get(period) || 0) + amountPaid);
+    }
+    const stats = appointmentStats.map((stat) => ({
+      ...stat,
+      expenses: Math.round((paidExpensesByPeriod.get(stat.date) || 0) * 100) / 100,
+    }));
 
     const totalAppointments = await Appointment.countDocuments({
       patientId: new mongoose.Types.ObjectId(patientId),
     });
 
-    const totalExpenses = await Appointment.aggregate([
-      {
-        $match: {
-          patientId: new mongoose.Types.ObjectId(patientId),
-          status: 'completed',
-        },
-      },
-      {
-        $lookup: {
-          from: 'appointmentdetails',
-          localField: '_id',
-          foreignField: 'appointmentId',
-          as: 'details',
-        },
-      },
-      {
-        $unwind: {
-          path: '$details',
-          preserveNullAndEmptyArrays: true,
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: { $ifNull: ['$details.tarif', 0] } },
-        },
-      },
-    ]);
+    const patientAppointmentsForTotal = await Appointment.find({
+      patientId: new mongoose.Types.ObjectId(patientId),
+      status: { $in: ['accepted', 'completed'] },
+    }).select('_id').lean();
+    const totalExpenses = patientAppointmentsForTotal.reduce(
+      (total, appointment) => total + (amountPaidByAppointment.get(String(appointment._id)) || 0),
+      0
+    );
 
     const upcomingAppointments = await Appointment.countDocuments({
       patientId: new mongoose.Types.ObjectId(patientId),
@@ -1141,7 +1160,7 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
     console.log("Résultat final:", {
       stats,
       totalAppointments,
-      totalExpenses: totalExpenses[0]?.total || 0,
+      totalExpenses: Math.round(totalExpenses * 100) / 100,
       upcomingAppointments,
       completionRate: parseFloat(completionRate.toFixed(2)),
       statusDistribution,
@@ -1151,7 +1170,7 @@ router.get('/patient/:patientId/stats', authenticateToken, async (req, res) => {
       message: 'Statistiques récupérées avec succès.',
       stats,
       totalAppointments,
-      totalExpenses: totalExpenses[0]?.total || 0,
+      totalExpenses: Math.round(totalExpenses * 100) / 100,
       upcomingAppointments,
       completionRate: parseFloat(completionRate.toFixed(2)),
       statusDistribution,
